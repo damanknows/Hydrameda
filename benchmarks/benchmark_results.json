@@ -1,0 +1,275 @@
+{
+  "summary": {
+    "suite": "all",
+    "timestamp": "2026-11-04 10:21:02",
+    "total": 30,
+    "pass_at_1": 11,
+    "pass_at_k_self_healed": 26,
+    "pass_at_1_rate": 36.7,
+    "pass_at_k_rate": 86.7,
+    "net_neuro_symbolic_gain_pct": 50.0,
+    "avg_latency_sec": 44.46,
+    "by_category": {
+      "HumanEval": {
+        "total": 10,
+        "pass_1": 9,
+        "pass_k": 10,
+        "time_sum": 244.51999999999998
+      },
+      "SecurityEval": {
+        "total": 10,
+        "pass_1": 0,
+        "pass_k": 8,
+        "time_sum": 537.21
+      },
+      "RepoBench": {
+        "total": 10,
+        "pass_1": 2,
+        "pass_k": 8,
+        "time_sum": 552.08
+      }
+    }
+  },
+  "tasks": [
+    {
+      "task_id": "he-humaneval-0",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 16.87
+    },
+    {
+      "task_id": "he-humaneval-1",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 11.65
+    },
+    {
+      "task_id": "he-humaneval-2",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 11.57
+    },
+    {
+      "task_id": "he-humaneval-3",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 11.76
+    },
+    {
+      "task_id": "he-humaneval-4",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 71.4
+    },
+    {
+      "task_id": "he-humaneval-5",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 12.63
+    },
+    {
+      "task_id": "he-humaneval-6",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 12.47
+    },
+    {
+      "task_id": "he-humaneval-7",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 13.1
+    },
+    {
+      "task_id": "he-humaneval-8",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 11.85
+    },
+    {
+      "task_id": "he-humaneval-9",
+      "category": "HumanEval",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 71.22
+    },
+    {
+      "task_id": "sec-cwe-020-author-1",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 19.68
+    },
+    {
+      "task_id": "sec-cwe-020-codeql-2",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 2,
+      "elapsed_sec": 23.81
+    },
+    {
+      "task_id": "sec-cwe-020-codeql-3",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 2,
+      "elapsed_sec": 74.21
+    },
+    {
+      "task_id": "sec-cwe-022-author-2",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 2,
+      "elapsed_sec": 22.93
+    },
+    {
+      "task_id": "sec-cwe-022-codeql-1",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 3,
+      "elapsed_sec": 83.62
+    },
+    {
+      "task_id": "repo-001-token-chunker",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 25.19
+    },
+    {
+      "task_id": "repo-002-circuit-breaker",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 85.29
+    },
+    {
+      "task_id": "repo-003-lru-ttl-cache",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 24.06
+    },
+    {
+      "task_id": "repo-004-dag-task-scheduler",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 26.22
+    },
+    {
+      "task_id": "repo-005-event-bus-pubsub",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 80.17
+    },
+    {
+      "task_id": "repo-006-rate-limiter-sliding",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": true,
+      "retries": 0,
+      "elapsed_sec": 18.79
+    },
+    {
+      "task_id": "repo-008-semver-constraint-resolver",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 85.8
+    },
+    {
+      "task_id": "repo-009-structured-audit-logger",
+      "category": "RepoBench",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 23.73
+    },
+    {
+      "task_id": "sec-cwe-020-author-2",
+      "category": "SecurityEval",
+      "passed": false,
+      "pass_at_1": false,
+      "retries": 3,
+      "elapsed_sec": 90.02
+    },
+    {
+      "task_id": "sec-cwe-020-codeql-1",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 2,
+      "elapsed_sec": 27.89
+    },
+    {
+      "task_id": "sec-cwe-020-codeql-4",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 1,
+      "elapsed_sec": 24.94
+    },
+    {
+      "task_id": "sec-cwe-022-author-1",
+      "category": "SecurityEval",
+      "passed": true,
+      "pass_at_1": false,
+      "retries": 2,
+      "elapsed_sec": 77.98
+    },
+    {
+      "task_id": "sec-cwe-022-codeql-2",
+      "category": "SecurityEval",
+      "passed": false,
+      "pass_at_1": false,
+      "retries": 3,
+      "elapsed_sec": 92.13
+    },
+    {
+      "task_id": "repo-007-ast-import-analyzer",
+      "category": "RepoBench",
+      "passed": false,
+      "pass_at_1": false,
+      "retries": 3,
+      "elapsed_sec": 95.68
+    },
+    {
+      "task_id": "repo-010-markdown-frontmatter-indexer",
+      "category": "RepoBench",
+      "passed": false,
+      "pass_at_1": false,
+      "retries": 3,
+      "elapsed_sec": 87.15
+    }
+  ]
+}

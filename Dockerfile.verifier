@@ -1,0 +1,11 @@
+FROM python:3.12-slim-bookworm
+
+# Install deterministic static analysis, security, and test tools
+RUN pip install --no-cache-dir pytest ruff mypy bandit pydantic
+
+# Create unprivileged rootless user for untrusted code execution
+RUN useradd -m -u 10001 sandboxuser
+USER sandboxuser
+WORKDIR /app
+
+ENTRYPOINT ["sh", "-c"]

@@ -1,0 +1,29 @@
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: hydrameda-litellm
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    volumes:
+      - ./litellm/litellm_config.yaml:/app/config.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: hydrameda-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_SECURE_COOKIE=false
+      - GENERIC_TIMEZONE=Asia/Kolkata
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+      - ${OBSIDIAN_VAULT_PATH:-/home/daman/ObsidianVault}:/data/obsidian
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

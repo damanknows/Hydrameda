@@ -1,0 +1,22 @@
+# Secrets & Environment
+.env
+*.pem
+*.key
+
+# Virtualenvs, Model Caches & Runtime Databases
+.venv/
+.fastembed_cache/
+n8n_data/
+state.db
+state.db-shm
+state.db-wal
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Dynamic Worktrees, Vector DBs & Logs
+worktrees/
+*.log
+lancedb_data/

@@ -1,0 +1,4 @@
+task-rate-limiter|Create a thread-safe Token Bucket and Sliding Window rate limiter in Python using standard library time and threading with comprehensive pytest unit tests
+task-lru-ttl-cache|Create a generic thread-safe LRU cache with TTL expiration using collections.OrderedDict and time with full mypy type annotations and pytest unit tests
+task-webhook-signer|Create an HMAC-SHA256 webhook payload signer and replay-attack timestamp verifier with constant-time digest comparison and pytest unit tests
+task-log-sanitizer|Create a structured JSON security log sanitizer that redacts PII, bearer tokens, and credit card numbers using regex with comprehensive pytest unit tests
