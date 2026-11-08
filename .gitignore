@@ -20,3 +20,4 @@ __pycache__/
 worktrees/
 *.log
 lancedb_data/
+.python-3.12/

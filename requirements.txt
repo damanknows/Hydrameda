@@ -1,0 +1,21 @@
+# Hydrameda Dependencies (pinned from environment)
+bandit==1.9.4
+fastapi==0.162.0
+fastembed==0.9.1
+httpx==0.28.1
+lancedb==0.41.0
+langgraph==1.2.18
+langgraph-checkpoint-sqlite==3.1.2
+litellm==1.106.6
+mcp==2.3.0
+mypy==2.4.1
+openai==2.54.0
+pytest==9.2.0
+python-dotenv==1.2.4
+ruff==0.17.3
+tree-sitter==0.26.0
+tree-sitter-language-pack==1.22.1
+uvicorn==0.54.0
+
+# Optional integrations
+edge-tts==7.2.10

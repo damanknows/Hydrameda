@@ -1,5 +1,77 @@
 model_list:
-  # --- NODE 1: ARCHITECT (Groq + Cerebras gpt-oss-120b) ---
+  # --- ROLE: PLANNER (Groq -> Cerebras) ---
+  - model_name: planner
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      timeout: 30
+  - model_name: planner
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+      timeout: 30
+
+  # --- ROLE: REPOSITORY_ANALYZER (Cerebras -> Groq) ---
+  - model_name: repository_analyzer
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+      timeout: 30
+  - model_name: repository_analyzer
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      timeout: 30
+
+  # --- ROLE: CODER (Cerebras -> Groq) ---
+  - model_name: coder
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+      timeout: 30
+  - model_name: coder
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      timeout: 30
+
+  # --- ROLE: REPAIRER (Groq -> Cerebras) ---
+  - model_name: repairer
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      timeout: 30
+  - model_name: repairer
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+      timeout: 30
+
+  # --- ROLE: VERIFICATION_ANALYZER (Cerebras -> Groq) ---
+  - model_name: verification_analyzer
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+      timeout: 30
+  - model_name: verification_analyzer
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      timeout: 30
+
+  # --- ROLE: REVIEWER (Groq -> Cerebras) ---
+  - model_name: reviewer
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      timeout: 30
+  - model_name: reviewer
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+      timeout: 30
+
+  # --- BACKWARD COMPATIBILITY ALIASES ---
   - model_name: hybrid-architect
     litellm_params:
       model: groq/openai/gpt-oss-120b
@@ -11,7 +83,6 @@ model_list:
       api_key: os.environ/CEREBRAS_API_KEY
       timeout: 30
 
-  # --- NODE 2: CODER (Cerebras + Groq gpt-oss-120b) ---
   - model_name: hybrid-coder
     litellm_params:
       model: cerebras/gpt-oss-120b
@@ -23,7 +94,6 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
       timeout: 30
 
-  # --- HERMES WHATSAPP DEFAULT ROUTE ---
   - model_name: default
     litellm_params:
       model: cerebras/gpt-oss-120b

@@ -3,7 +3,8 @@ import asyncio, json, re, time, threading, subprocess
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-HYDRAMEDA_ROOT = Path.home() / 'hydrameda'
+import os
+HYDRAMEDA_ROOT = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / 'hydrameda'))
 PYTHON_BIN = HYDRAMEDA_ROOT / '.venv' / 'bin' / 'python'
 GRAPH_SCRIPT = HYDRAMEDA_ROOT / 'langgraph_engine' / 'graph.py'
 HERMES_OUTBOX = Path.home() / '.hermes' / 'voice_outbox'
@@ -20,7 +21,7 @@ def execute_pipeline_job(sender: str, prompt: str, repo_path: str):
     cmd = [str(PYTHON_BIN), str(GRAPH_SCRIPT), '--prompt', prompt, '--repo', repo_path, '--task-id', task_id]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     print(proc.stdout, flush=True)
-    status = 'PASSED' if 'status: PASSED' in proc.stdout else 'FAILED'
+    status = 'PASSED' if (proc.returncode == 0 and 'status: PASSED' in proc.stdout) else 'FAILED'
     summary_speech = f'Hydrameda autonomous build report for {slug.replace("-", " ")}. Pipeline execution completed with status {status}.'
     mp3_path = HERMES_OUTBOX / f'{task_id}.mp3'
     try:

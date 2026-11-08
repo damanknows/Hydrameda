@@ -7,12 +7,17 @@ import lancedb
 from fastembed import TextEmbedding
 from tree_sitter_language_pack import get_parser
 
+HYDRAMEDA_ROOT = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda"))
 OBSIDIAN_VAULT = Path(os.getenv("OBSIDIAN_VAULT_PATH", Path.home() / "ObsidianVault"))
-LANCEDB_DIR = Path.home() / "hydrameda" / "lancedb_data"
-WORKTREES_DIR = Path.home() / "hydrameda" / "worktrees"
-FASTEMBED_CACHE = Path.home() / "hydrameda" / ".fastembed_cache"
+LANCEDB_DIR = HYDRAMEDA_ROOT / "lancedb_data"
+WORKTREES_DIR = HYDRAMEDA_ROOT / "worktrees"
+FASTEMBED_CACHE = HYDRAMEDA_ROOT / ".fastembed_cache"
 
-IGNORE_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", "dist", "build", "n8n_data", "lancedb_data", "worktrees", ".fastembed_cache"}
+IGNORE_DIRS = {
+    ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
+    "dist", "build", "n8n_data", "lancedb_data", "worktrees", ".fastembed_cache",
+    ".python-3.12", "site-packages", ".idea", ".vscode"
+}
 
 _EMBEDDER_INSTANCE = None
 
@@ -36,7 +41,8 @@ def extract_ast_skeleton(repo_path: str, max_chars: int = 5000) -> str:
     lines: List[str] = [f"# AST REPO MAP: {root.name}"]
 
     for file_path in sorted(root.rglob("*.py")):
-        if any(part in IGNORE_DIRS for part in file_path.relative_to(root).parts):
+        rel_parts = file_path.relative_to(root).parts
+        if any(part in IGNORE_DIRS or (part.startswith(".") and part != ".") for part in rel_parts):
             continue
         try:
             source_bytes = file_path.read_bytes()
@@ -101,7 +107,16 @@ class ObsidianRAG:
                 "vector": vec.tolist()
             })
 
-        self.db.create_table(self.table_name, data=records, mode="overwrite")
+        existing_tables = self.db.list_tables() if hasattr(self.db, "list_tables") else self.db.table_names()
+        if self.table_name not in existing_tables:
+            self.db.create_table(self.table_name, data=records)
+        else:
+            tbl = self.db.open_table(self.table_name)
+            try:
+                tbl.merge_insert("path").when_matched_update_all().when_not_matched_insert_all().execute(records)
+            except Exception:
+                # Fallback to table creation if schema changed
+                self.db.create_table(self.table_name, data=records, mode="overwrite")
         return len(records)
 
     def query(self, query_text: str, top_k: int = 2) -> str:

@@ -20,16 +20,14 @@ except ImportError:
         try:
             from mcp.server.fastmcp import FastMCP
         except ImportError:
-            class FastMCP:
-                def __init__(self, name: str): self.name = name
-                def tool(self): return lambda fn: fn
-                def run(self, **kwargs): pass
+            sys.stderr.write("FATAL: MCP library not found. Install with `pip install mcp` or `pip install fastmcp`\n")
+            sys.exit(1)
 
-ENGINE_DIR = Path.home() / "hydrameda" / "langgraph_engine"
+HYDRAMEDA_ROOT = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda"))
+ENGINE_DIR = HYDRAMEDA_ROOT / "langgraph_engine"
 sys.path.insert(0, str(ENGINE_DIR))
 from preprocessor import extract_ast_skeleton, ObsidianRAG
 
-HYDRAMEDA_ROOT = Path.home() / "hydrameda"
 OBSIDIAN_VAULT = Path(os.getenv("OBSIDIAN_VAULT_PATH", Path.home() / "ObsidianVault"))
 WORKTREES_DIR = HYDRAMEDA_ROOT / "worktrees"
 PYTHON_BIN = HYDRAMEDA_ROOT / ".venv" / "bin" / "python"
@@ -64,7 +62,7 @@ def get_repo_ast_map(repo_path: str) -> str:
     return extract_ast_skeleton(repo_path, max_chars=8000)
 
 @mcp.tool()
-def list_verified_worktrees() -> str:
+def list_verified_worktrees(verified_only: bool = False) -> str:
     """Shows isolated Git worktree branches verified by the LangGraph loop ready for surgical editing."""
     if not WORKTREES_DIR.exists():
         return "No worktrees directory found."
@@ -83,8 +81,12 @@ def list_verified_worktrees() -> str:
         )
         branch = branch_res.stdout.strip() or "detached"
         last_commit = commit_res.stdout.strip() or "uncommitted"
+        is_verified = "verified autonomous build" in last_commit.lower()
+        if verified_only and not is_verified:
+            continue
+        status_tag = "✅ VERIFIED" if is_verified else "⏳ UNVERIFIED"
         files = [p.name for p in sorted(wt.glob("*.py"))]
-        out.append(f"- **{wt.name}** | Branch: `{branch}` | Latest: `{last_commit}` | Path: `{wt}` | Files: {files}")
+        out.append(f"- **{wt.name}** [{status_tag}] | Branch: `{branch}` | Latest: `{last_commit}` | Path: `{wt}` | Files: {files}")
     return "\n".join(out)
 
 @mcp.tool()
@@ -115,11 +117,23 @@ def trigger_autonomous_build(prompt: str, task_id: str = "") -> str:
     return f"🚀 Background build started for `{tid}`.\n- Log: `{log_file}`\n- Worktree: `{WORKTREES_DIR / tid}`"
 
 @mcp.tool()
-def merge_verified_worktree(task_id: str, target_dir: str, module_rename: str = "") -> str:
-    """Copies verified worktree Python files into target_dir (optionally renaming module.py)."""
+def merge_verified_worktree(task_id: str, target_dir: str, module_rename: str = "", force: bool = False) -> str:
+    """Copies verified worktree Python files into target_dir (optionally renaming module.py).
+    
+    Refuses to merge unverified worktrees unless force=True.
+    """
     wt = WORKTREES_DIR / task_id
     if not wt.exists():
         return f"Worktree '{task_id}' not found."
+
+    commit_res = subprocess.run(
+        ["git", "-C", str(wt), "log", "-1", "--oneline"],
+        capture_output=True, text=True, check=False
+    )
+    last_commit = commit_res.stdout.strip()
+    if not force and "verified autonomous build" not in last_commit.lower():
+        return f"❌ Refusing to merge unverified worktree '{task_id}' (latest commit: '{last_commit}'). Set force=True to override."
+
     dest = Path(target_dir).expanduser().resolve()
     dest.mkdir(parents=True, exist_ok=True)
     copied = []
