@@ -259,12 +259,18 @@ class GovernanceEngine:
     @classmethod
     def validate_approval(
         cls,
-        decision: ApprovalDecision,
+        decision: Optional[ApprovalDecision],
         manifest: ChangeManifest,
         verification_passed: bool = True
     ) -> Tuple[bool, List[str]]:
         """Cryptographically validates the approval decision against the exact manifest hash and security constraints."""
         reasons: List[str] = []
+
+        if decision is None:
+            return False, ["Missing approval decision: approval data is required."]
+
+        if not isinstance(decision, ApprovalDecision):
+            return False, ["Invalid approval decision: must be an instance of ApprovalDecision."]
 
         if not decision.approved:
             return False, ["Approval explicitly denied or not granted."]
@@ -275,7 +281,9 @@ class GovernanceEngine:
 
         # Cryptographic Hash Binding Check (Prevent Stale Approvals)
         current_hash = manifest.manifest_hash
-        if decision.approved_manifest_hash != current_hash:
+        if not decision.approved_manifest_hash:
+            reasons.append("Approval lacks cryptographic hash binding (approved_manifest_hash is empty).")
+        elif decision.approved_manifest_hash != current_hash:
             reasons.append(
                 f"STALE APPROVAL: Approved hash `{decision.approved_manifest_hash}` does not match "
                 f"current manifest hash `{current_hash}`. The codebase has changed since approval was granted."
@@ -331,7 +339,12 @@ class SafeConsolidator:
             if manifest.applied and wt.exists() and wt != main_repo:
                 try:
                     patch_engine = PatchEngine(target_worktree=wt, allow_delete=True)
-                    patch_engine.rollback_manifest(manifest)
+                    rollback_success = patch_engine.rollback_manifest(manifest)
+                    if not rollback_success:
+                        val_reasons.append(
+                            f"Rollback incomplete for files: {manifest.metadata.get('rollback_failures')}. "
+                            f"Backups preserved at: {manifest.metadata.get('backup_dir')}"
+                        )
                 except Exception as rollback_err:
                     val_reasons.append(f"Rollback error: {rollback_err}")
 

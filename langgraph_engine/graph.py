@@ -414,7 +414,7 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
     """
     node = "approval_gate"
     current_status = state.get("approval_status")
-    auto_approve = state.get("auto_approve", True)
+    auto_approve = state.get("auto_approve", False)
 
     if auto_approve or current_status == "APPROVED":
         state["approval_status"] = "APPROVED"
@@ -853,7 +853,7 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
             decision = ApprovalDecision.from_dict(existing_decision_dict)
             if decision.approved_manifest_hash != manifest.manifest_hash:
                 needs_interrupt = True  # Prior approval is stale!
-        elif not state.get("auto_approve", True) or state.get("require_consolidation_approval", False):
+        elif not state.get("auto_approve", False) or state.get("require_consolidation_approval", False):
             needs_interrupt = True
 
         if needs_interrupt:
@@ -876,44 +876,48 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
                 "question": "Approve change consolidation into repository? [approved: True/False, destructive_approved: True/False, merge_approved: True/False]"
             })
 
-            # Parse resumed decision
-            if isinstance(resume_val, dict):
+            # Parse resumed decision - NEVER interpret missing approval data as consent
+            if isinstance(resume_val, dict) and bool(resume_val.get("approved", False)):
                 decision = ApprovalDecision(
-                    approved=bool(resume_val.get("approved", False)),
-                    approved_manifest_hash=resume_val.get("approved_manifest_hash", manifest.manifest_hash),
+                    approved=True,
+                    approved_manifest_hash=resume_val.get("approved_manifest_hash") or manifest.manifest_hash,
                     approver=resume_val.get("approver", "human"),
                     destructive_approved=bool(resume_val.get("destructive_approved", False)),
                     merge_approved=bool(resume_val.get("merge_approved", False)),
                     comments=resume_val.get("comments")
                 )
-            elif isinstance(resume_val, bool):
+            elif isinstance(resume_val, bool) and resume_val is True:
                 decision = ApprovalDecision(
-                    approved=resume_val,
-                    approved_manifest_hash=manifest.manifest_hash if resume_val else None,
+                    approved=True,
+                    approved_manifest_hash=manifest.manifest_hash,
                     approver="human",
-                    destructive_approved=state.get("destructive_approved", False),
-                    merge_approved=state.get("merge_approved", False)
+                    destructive_approved=bool(state.get("destructive_approved", False)),
+                    merge_approved=bool(state.get("merge_approved", False))
                 )
-            elif isinstance(resume_val, str):
-                approved_str = resume_val.strip().lower() in ("yes", "y", "approved", "true")
+            elif isinstance(resume_val, str) and resume_val.strip().lower() in ("yes", "y", "approved", "true"):
                 decision = ApprovalDecision(
-                    approved=approved_str,
-                    approved_manifest_hash=manifest.manifest_hash if approved_str else None,
+                    approved=True,
+                    approved_manifest_hash=manifest.manifest_hash,
                     approver="human",
-                    destructive_approved=state.get("destructive_approved", False),
-                    merge_approved=state.get("merge_approved", False)
+                    destructive_approved=bool(state.get("destructive_approved", False)),
+                    merge_approved=bool(state.get("merge_approved", False))
                 )
             else:
-                decision = ApprovalDecision(approved=False)
+                decision = ApprovalDecision(
+                    approved=False,
+                    approved_manifest_hash=None,
+                    approver="human",
+                    comments="Approval not granted or missing in resume input"
+                )
 
         elif not decision:
-            # Auto-approve mode: bind decision to current manifest hash
+            # Trusted automation mode (explicitly enabled): bind decision to current manifest hash
             decision = ApprovalDecision(
                 approved=True,
                 approved_manifest_hash=manifest.manifest_hash,
-                approver="auto",
-                destructive_approved=state.get("destructive_approved", True),
-                merge_approved=state.get("merge_approved", False)
+                approver="trusted_automation",
+                destructive_approved=bool(state.get("destructive_approved", False)),
+                merge_approved=bool(state.get("merge_approved", False))
             )
 
         state["approval_decision"] = decision.to_dict()
@@ -1092,14 +1096,16 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", "-p", type=str, default=None, help="Task prompt (named flag)")
     parser.add_argument("--repo", "-r", type=str, default=str(HYDRAMEDA_ROOT), help="Target repository path")
     parser.add_argument("--task-id", "-t", type=str, default=None, help="Explicit task ID")
-    parser.add_argument("--auto-approve", action="store_true", default=True, help="Auto-approve specification (default: True)")
+    parser.add_argument("--auto-approve", action="store_true", default=False, help="Explicitly enable trusted auto-approval (default: False)")
+    parser.add_argument("--destructive-approved", action="store_true", default=False, help="Explicitly authorize destructive file deletions (default: False)")
+    parser.add_argument("--merge-approved", action="store_true", default=False, help="Explicitly authorize merging into main branch (default: False)")
     parser.add_argument("--interactive", action="store_true", default=False, help="Enable human review interrupt gate")
     args = parser.parse_args()
 
     prompt_arg = args.prompt or args.positional_prompt or "Create a JWT token validator with unit tests"
     slug = re.sub(r"[^a-z0-9]+", "-", prompt_arg.lower()).strip("-")[:24].rstrip("-")
     task_id = args.task_id or f"task-{slug}-{int(time.time()) % 10000}"
-    auto_approve = False if args.interactive else args.auto_approve
+    auto_approve = args.auto_approve and not args.interactive
 
     print(f"🚀 Starting Hydrameda Neuro-Symbolic Engine for task: '{task_id}' (auto_approve={auto_approve})")
     app = build_hydrameda_graph()
@@ -1110,6 +1116,8 @@ if __name__ == "__main__":
         "repo_path": args.repo,
         "auto_approve": auto_approve,
         "approval_status": "PENDING",
+        "destructive_approved": args.destructive_approved,
+        "merge_approved": args.merge_approved,
         "route": "execute",
         "task_analysis": {},
         "vault_context": "",
