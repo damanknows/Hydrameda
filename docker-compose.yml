@@ -11,6 +11,8 @@ services:
       - ./litellm/litellm_config.yaml:/app/config.yaml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
     command: ["--config", "/app/config.yaml", "--port", "4000"]
 
   n8n:
@@ -19,6 +21,8 @@ services:
     restart: unless-stopped
     ports:
       - "5678:5678"
+    security_opt:
+      - no-new-privileges:true
     environment:
       - N8N_SECURE_COOKIE=false
       - GENERIC_TIMEZONE=Asia/Kolkata

@@ -13,7 +13,18 @@ from verification_engine.models import CheckResult, CheckStatus, CheckName
 
 @dataclass
 class SandboxConfig:
-    """Configuration and security limits for Docker sandbox execution."""
+    """Configuration and security limits for Docker sandbox execution.
+    
+    Security Architecture Notes:
+    1. Container UID:GID: Executing as non-root (UID 10001, GID 10001) prevents in-container
+       privilege escalation.
+    2. Host Daemon Distinction: Non-root container execution does NOT by itself prove or establish
+       that the host Docker daemon is rootless. If dockerd runs as host root, defense-in-depth relies
+       on dropped capabilities (--cap-drop ALL), no-new-privileges, network isolation, and read-only rootfs.
+       For strict multi-tenant isolation, rootless dockerd or gVisor (runsc) is required.
+    3. Executable tmpfs: /tmp is mounted with 'exec' because the container rootfs is read-only (/app:ro),
+       and Python bytecode execution (.pyc) and test execution require an isolated writable scratchpad.
+    """
     image: str = "hydrameda-verifier:latest"
     user: str = "10001:10001"
     network: str = "none"
@@ -21,8 +32,9 @@ class SandboxConfig:
     cpu_limit: str = "1.0"
     pids_limit: int = 100
     read_only_root: bool = True
-    tmpfs_mount: str = "/tmp:size=256m,exec"
+    tmpfs_mount: str = "/tmp:size=256m,mode=1777,exec"
     timeout_seconds: float = 60.0
+    seccomp_profile: Optional[str] = None
     allowed_mounts: List[str] = field(default_factory=list)
 
     def validate_mounts(self, target_mount: Path) -> None:
@@ -134,10 +146,16 @@ class SandboxRunner:
             "--memory", self.config.memory_limit,
             "--cpus", self.config.cpu_limit,
             "--tmpfs", self.config.tmpfs_mount,
+        ]
+
+        if self.config.seccomp_profile:
+            cmd.extend(["--security-opt", f"seccomp={self.config.seccomp_profile}"])
+
+        cmd.extend([
             "-v", f"{wt}:/app:ro",
             self.config.image,
             full_script
-        ]
+        ])
 
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -160,10 +178,14 @@ class SandboxRunner:
             )
 
         except subprocess.TimeoutExpired:
-            # Enforce clean container termination on timeout
+            # Enforce clean container termination and complete removal on timeout
             duration_ms = (time.perf_counter() - start_t) * 1000.0
             try:
                 subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
+            except Exception:
+                pass
+            try:
+                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
             except Exception:
                 pass
             return CheckResult(
