@@ -33,7 +33,7 @@ from pathlib import Path
 
 DEFAULT_REPO = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda")).resolve()
 DEFAULT_BENCH_DIR = DEFAULT_REPO / "benchmarks"
-DEFAULT_BIN = Path.home() / ".local" / "bin" / "hydrameda"
+DEFAULT_BIN = (DEFAULT_REPO / "scripts" / "hydrameda") if (DEFAULT_REPO / "scripts" / "hydrameda").exists() else (Path.home() / ".local" / "bin" / "hydrameda")
 DEFAULT_VAULT = Path(os.getenv("OBSIDIAN_VAULT_PATH", Path.home() / "ObsidianVault")).resolve()
 DEFAULT_REPORT_MD = DEFAULT_VAULT / "Lessons-Learned" / "Hydrameda-Benchmark-Report.md"
 DEFAULT_REPORT_JSON = DEFAULT_BENCH_DIR / "benchmark_results.json"
@@ -239,6 +239,10 @@ def main():
     report_md = Path(args.report_md).resolve()
     archive_dir = Path(args.archive_dir).resolve()
     bin_path = Path(args.bin_path).resolve()
+    if not bin_path.exists():
+        repo_script = repo_path / "scripts" / "hydrameda"
+        if repo_script.exists():
+            bin_path = repo_script
 
     limit = args.legacy_limit if args.legacy_limit is not None else args.limit
     suite_name = "mini" if (args.legacy_limit is not None and args.suite == "all") else args.suite

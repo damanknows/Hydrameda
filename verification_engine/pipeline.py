@@ -178,5 +178,7 @@ class VerificationPipeline:
             checks=checks,
             total_duration_ms=total_duration,
             summary=summary,
-            failure_diagnostics=diagnostics
+            failure_diagnostics=diagnostics,
+            sandbox_config=self.runner.config.to_dict()
         )
+

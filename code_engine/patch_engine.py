@@ -10,6 +10,7 @@ Guarantees:
 """
 from __future__ import annotations
 import logging
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -95,13 +96,32 @@ class PatchEngine:
                     shutil.copy2(target_path, b_path)
                     change.backup_path = str(b_path)
 
-                # Step 3: Execute file operation
+                # Step 3: Execute file operation with atomic write and permission preservation
                 if change.operation == FileOperation.CREATE:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
-                    target_path.write_text(change.proposed_content or "", encoding="utf-8")
+                    tmp_fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".hydra_atomic_tmp_")
+                    try:
+                        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                            f.write(change.proposed_content or "")
+                        os.replace(tmp_file, target_path)
+                    except Exception:
+                        if Path(tmp_file).exists():
+                            Path(tmp_file).unlink(missing_ok=True)
+                        raise
 
                 elif change.operation == FileOperation.MODIFY:
-                    target_path.write_text(change.proposed_content or "", encoding="utf-8")
+                    orig_stat = target_path.stat() if target_path.exists() else None
+                    tmp_fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".hydra_atomic_tmp_")
+                    try:
+                        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                            f.write(change.proposed_content or "")
+                        if orig_stat is not None:
+                            shutil.copystat(target_path, tmp_file)
+                        os.replace(tmp_file, target_path)
+                    except Exception:
+                        if Path(tmp_file).exists():
+                            Path(tmp_file).unlink(missing_ok=True)
+                        raise
 
                 elif change.operation == FileOperation.DELETE:
                     target_path.unlink()

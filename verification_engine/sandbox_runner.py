@@ -37,13 +37,37 @@ class SandboxConfig:
     seccomp_profile: Optional[str] = None
     allowed_mounts: List[str] = field(default_factory=list)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serializes sandbox configuration for audit logs and verification records."""
+        return {
+            "image": self.image,
+            "user": self.user,
+            "network": self.network,
+            "memory_limit": self.memory_limit,
+            "cpu_limit": self.cpu_limit,
+            "pids_limit": self.pids_limit,
+            "read_only_root": self.read_only_root,
+            "tmpfs_mount": self.tmpfs_mount,
+            "timeout_seconds": self.timeout_seconds,
+            "seccomp_profile": self.seccomp_profile,
+            "security_options": ["no-new-privileges", "cap-drop:ALL"]
+        }
+
     def validate_mounts(self, target_mount: Path) -> None:
-        """Enforces mount safety: rejects docker socket and unnecessary host trees."""
+        """Enforces mount safety: rejects docker socket, critical host trees, and sensitive credentials."""
         mount_str = str(target_mount.resolve()).lower()
         if "docker.sock" in mount_str:
             raise SecurityError("Forbidden mount: host Docker socket access is strictly prohibited.")
-        if mount_str in ("/", "/etc", "/var", "/usr", "/bin", "/root", "/proc", "/sys"):
+        if mount_str in ("/", "/etc", "/var", "/usr", "/bin", "/root", "/proc", "/sys", "/run", "/dev"):
             raise SecurityError(f"Forbidden mount: root or critical host directory '{mount_str}' cannot be mounted.")
+        
+        # Requirement A6.5: Prevent host credential exposure (.env, .git/credentials, .ssh, .aws, .netrc)
+        cred_names = [".env", ".git/credentials", ".ssh", ".aws", ".netrc", "id_rsa", "id_ed25519"]
+        for cred in cred_names:
+            cred_path = target_mount / cred
+            if cred_path.exists():
+                raise SecurityError(f"Forbidden mount: worktree exposes sensitive credential path '{cred}'.")
+
 
 
 class SecurityError(Exception):
@@ -197,7 +221,16 @@ class SandboxRunner:
                 diagnostic=f"Sandbox execution timed out ({timeout}s limit exceeded)"
             )
         except Exception as e:
+            # Enforce container cleanup on unexpected exceptions as well
             duration_ms = (time.perf_counter() - start_t) * 1000.0
+            try:
+                subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
+            except Exception:
+                pass
+            try:
+                subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
+            except Exception:
+                pass
             return CheckResult(
                 name=name_str,
                 status=CheckStatus.FAILED,
@@ -206,3 +239,34 @@ class SandboxRunner:
                 duration_ms=duration_ms,
                 diagnostic=f"Sandbox execution error: {e}"
             )
+
+    def get_host_isolation_metadata(self) -> Dict[str, Any]:
+        """Clearly distinguishes container non-root execution from rootless Docker host execution.
+        
+        Requirement A6.9:
+        - Container non-root: execution inside container is mapped to non-root UID 10001:10001.
+        - Host rootless: whether the host Docker daemon itself is rootless or standard dockerd.
+        """
+        is_rootless_daemon = False
+        daemon_security = []
+        try:
+            info_proc = subprocess.run(
+                ["docker", "info", "--format", "{{json .SecurityOptions}}"],
+                capture_output=True, text=True, timeout=5
+            )
+            if info_proc.returncode == 0 and info_proc.stdout.strip():
+                daemon_security = json.loads(info_proc.stdout.strip())
+                is_rootless_daemon = any("rootless" in s.lower() for s in daemon_security)
+        except Exception:
+            pass
+
+        return {
+            "container_user": self.config.user,
+            "container_non_root": self.config.user != "0:0" and "0:" not in self.config.user,
+            "host_daemon_rootless": is_rootless_daemon,
+            "daemon_security_options": daemon_security,
+            "capabilities_dropped": "ALL",
+            "network_isolation": self.config.network == "none",
+            "read_only_rootfs": self.config.read_only_root
+        }
+

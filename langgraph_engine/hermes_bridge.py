@@ -17,12 +17,16 @@ async def _synthesize_edge_tts(text: str, out_file: Path):
 
 def execute_pipeline_job(sender: str, prompt: str, repo_path: str):
     slug = re.sub(r'[^a-z0-9]+', '-', prompt.lower()).strip('-')[:24].rstrip('-')
-    task_id = f'task-{slug}-{int(time.time()) % 10000}'
-    cmd = [str(PYTHON_BIN), str(GRAPH_SCRIPT), '--prompt', prompt, '--repo', repo_path, '--task-id', task_id]
+    cmd = [str(PYTHON_BIN), str(GRAPH_SCRIPT), '--prompt', prompt, '--repo', repo_path, '--task-id', task_id, '--non-interactive']
     proc = subprocess.run(cmd, capture_output=True, text=True)
     print(proc.stdout, flush=True)
-    status = 'PASSED' if (proc.returncode == 0 and 'status: PASSED' in proc.stdout) else 'FAILED'
-    summary_speech = f'Hydrameda autonomous build report for {slug.replace("-", " ")}. Pipeline execution completed with status {status}.'
+    if proc.returncode == 0 and 'status: PASSED' in proc.stdout:
+        status = 'PASSED'
+    elif 'paused in AWAITING_APPROVAL' in proc.stdout:
+        status = 'AWAITING_APPROVAL'
+    else:
+        status = 'FAILED'
+    summary_speech = f'Hydrameda build report for {slug.replace("-", " ")}. Task is {status.replace("_", " ").lower()}.'
     mp3_path = HERMES_OUTBOX / f'{task_id}.mp3'
     try:
         asyncio.run(_synthesize_edge_tts(summary_speech, mp3_path))

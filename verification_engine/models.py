@@ -52,6 +52,7 @@ class VerificationReport:
     total_duration_ms: float = 0.0
     summary: str = ""
     failure_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    sandbox_config: Dict[str, Any] = field(default_factory=dict)
 
     def is_passed(self) -> bool:
         """Determines if verification passed cleanly.
@@ -76,8 +77,10 @@ class VerificationReport:
             "checks": {k: v.to_dict() for k, v in self.checks.items()},
             "total_duration_ms": self.total_duration_ms,
             "summary": self.summary,
-            "failure_diagnostics": self.failure_diagnostics
+            "failure_diagnostics": self.failure_diagnostics,
+            "sandbox_config": self.sandbox_config
         }
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
+

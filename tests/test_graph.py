@@ -53,6 +53,7 @@ def make_initial_state(task_id: str, auto_approve: bool = True, **overrides) -> 
         "user_prompt": "Create an addition function with pytest tests",
         "repo_path": str(Path(__file__).parent.parent),
         "auto_approve": auto_approve,
+        "trusted_policy": "eval_harness" if auto_approve else "",
         "approval_status": "PENDING",
         "route": "execute",
         "task_analysis": {},

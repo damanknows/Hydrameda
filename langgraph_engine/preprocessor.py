@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Any
@@ -129,24 +130,87 @@ class ObsidianRAG:
         return "\n\n".join([f"--- Vault Note: {r['path']} ---\n{r['content']}" for r in results])
 
 
+TASK_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-]+$")
+
+
+def validate_task_id(task_id: str) -> str:
+    """Enforce strict allowlist for task IDs.
+    
+    Rejects:
+    - Non-string types, empty strings, strings > 64 chars
+    - Path traversal sequences (..), absolute paths, separators (/, \\)
+    - Null bytes and non-alphanumeric/underscore/hyphen characters
+    """
+    if not isinstance(task_id, str):
+        raise ValueError(f"Task ID must be a string, got {type(task_id).__name__}")
+    task_id = task_id.strip()
+    if not task_id:
+        raise ValueError("Task ID cannot be empty")
+    if len(task_id) > 64:
+        raise ValueError(f"Task ID exceeds maximum length of 64 characters: '{task_id}'")
+    if "\0" in task_id:
+        raise ValueError(f"Task ID contains null bytes: '{task_id}'")
+    if "/" in task_id or "\\" in task_id or ".." in task_id:
+        raise ValueError(f"Task ID contains path separators or traversal sequences: '{task_id}'")
+    if not TASK_ID_REGEX.match(task_id):
+        raise ValueError(f"Task ID contains invalid characters (must match ^[a-zA-Z0-9_\\-]+$): '{task_id}'")
+    return task_id
+
+
 def create_isolated_worktree(repo_path: str, task_id: str) -> str:
+    """Provisions an isolated Git worktree branch for safe execution.
+    
+    Guarantees:
+    - Task ID validated against strict allowlist.
+    - Target worktree path strictly contained beneath WORKTREES_DIR.
+    - Symlink escape prevention.
+    - Explicit collision rejection (never deletes existing worktrees implicitly).
+    """
+    valid_task_id = validate_task_id(task_id)
     repo = Path(repo_path).resolve()
     repo.mkdir(parents=True, exist_ok=True)
-    WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
-    worktree_target = WORKTREES_DIR / task_id
-    branch_name = f"hydrameda/{task_id}"
+
+    worktree_root = WORKTREES_DIR.resolve()
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    worktree_target = (worktree_root / valid_task_id).resolve()
+
+    # Verify containment beneath configured worktree root
+    if not worktree_target.is_relative_to(worktree_root) or worktree_target == worktree_root:
+        raise ValueError(f"Worktree path '{worktree_target}' escapes worktree root '{worktree_root}'")
+
+    # Reject collisions with existing task IDs
+    if worktree_target.exists():
+        raise FileExistsError(f"Task ID collision: Worktree already exists for '{valid_task_id}' at {worktree_target}")
+
+    branch_name = f"hydrameda/{valid_task_id}"
 
     if not (repo / ".git").exists():
         subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "hydrameda@local"], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Hydrameda Agent"], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "--allow-empty", "-m", "Initial root commit"], check=True, capture_output=True)
+        git_env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Hydrameda Agent",
+            "GIT_AUTHOR_EMAIL": "hydrameda@local",
+            "GIT_COMMITTER_NAME": "Hydrameda Agent",
+            "GIT_COMMITTER_EMAIL": "hydrameda@local",
+        }
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "--allow-empty", "-m", "Initial root commit"],
+            env=git_env, check=True, capture_output=True
+        )
 
     subprocess.run(["git", "-C", str(repo), "worktree", "prune"], check=False, capture_output=True)
-
-    if worktree_target.exists():
-        subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree_target)], check=False, capture_output=True)
-
     subprocess.run(["git", "-C", str(repo), "branch", "-D", branch_name], check=False, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch_name, str(worktree_target)], check=True, capture_output=True)
+    try:
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch_name, str(worktree_target)], check=True, capture_output=True)
+    except subprocess.CalledProcessError as wt_err:
+        err_msg = wt_err.stderr.decode("utf-8", errors="ignore") if wt_err.stderr else str(wt_err)
+        # If git worktree add cannot write to parent .git (e.g. read-only container/sandbox), fall back to isolated local clone
+        if "read-only" in err_msg.lower() or "read-only" in str(wt_err).lower():
+            subprocess.run(["git", "clone", "--no-hardlinks", str(repo), str(worktree_target)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(worktree_target), "checkout", "-b", branch_name], check=True, capture_output=True)
+        else:
+            raise
     return str(worktree_target)
+
+
+

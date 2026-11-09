@@ -513,6 +513,7 @@ def test_langgraph_consolidation_interrupt_and_resume():
         "user_prompt": "Create an addition function",
         "repo_path": str(Path(__file__).parent.parent),
         "auto_approve": True,  # Spec is auto-approved, but consolidation requires review
+        "trusted_policy": "eval_harness",
         "require_consolidation_approval": True,
         "approval_status": "APPROVED",
         "route": "execute",

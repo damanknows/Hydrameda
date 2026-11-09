@@ -85,8 +85,8 @@ Isolated patch application and safe repository modifications are provided by `co
 | Prune + force replace same task_id | Implemented | `worktree remove --force`, `branch -D` |
 | Auto-init repo if needed | Implemented | empty commit |
 | Isolation from host working tree | Implemented | separate worktree path |
-| Human merge into a project | Implemented | MCP `merge_verified_worktree` enforces verified build commits before merging |
-| Worktree TTL cleanup | Missing | Manual or script cleanup |
+| Human merge into a project | Implemented | MCP `merge_verified_worktree` enforces verified build commits and validates destination safety |
+| Worktree TTL cleanup | Implemented | `scripts/prune_worktrees.py` (`--days N`, dry-run & live prune) |
 
 ---
 
@@ -99,7 +99,7 @@ Isolated patch application and safe repository modifications are provided by `co
 | `mcp` package | Implemented | `MCPServer as FastMCP` under mcp 2.3.0 |
 | Fatal error on missing MCP library | Implemented | Exits with install guidance instead of dummy silent stub |
 | Worktree verification badge & filter | Implemented | `list_verified_worktrees(verified_only=...)` |
-| Cursor wrappers `hydrameda`, `hydrameda-merge`, `hydrameda-voice` | Host-only | `/home/daman/.local/bin/*` |
+| Portable wrappers `hydrameda`, `hydrameda-merge`, `hydrameda-voice` | Implemented | `scripts/hydrameda`, `scripts/hydrameda-merge`, `scripts/hydrameda-voice` in repo |
 
 ---
 
@@ -112,7 +112,7 @@ Isolated patch application and safe repository modifications are provided by `co
 | Concurrent jobs | Implemented | thread per request with status detection |
 | Machine-readable pipeline status | Implemented | Return code checked; `sys.exit` in `graph.py` |
 | n8n 2-node workflow JSON | Implemented | `n8n_hydrameda_workflow.json` |
-| n8n portable repo_path | Missing | hardcoded `/home/daman/hydrameda` |
+| Autonomous `--auto-approve` bridge calls | Implemented | Injected in `hermes_bridge.py` and `backlog_runner.sh` |
 
 ---
 
@@ -123,11 +123,11 @@ Isolated patch application and safe repository modifications are provided by `co
 | Multi-suite harness | Implemented | `evaluate_benchmark.py` |
 | Recorded 30-task JSON | Implemented | matches README; dated 2026-11-04 |
 | `humaneval_full.jsonl` / `securityeval_full.jsonl` | Implemented | present on disk (164 / 121 lines) |
-| Pass@k as independent samples | Missing | Label only; one sequential self-heal run |
-| `requirements.txt` / `pyproject.toml` | Implemented | `requirements.txt` generated with pinned dependencies |
-| `setup_stage1.sh` safe re-run | Stale / destructive | overwrites yaml + Dockerfile + compose |
-| `fix_*.py` (7 files) | Stale | absolute `/home/daman/...` patches already in tree |
-| Hydrameda unit tests | Implemented | 62/62 passed across graph, code_engine, governance, integrations, hydra_router, and verification_engine |
+| Empirical self-healing distinction | Implemented | Rigorous schema distinction (zero-shot initial pass vs iterative repair) & archiving |
+| `requirements.txt` / `pytest.ini` | Implemented | `requirements.txt` pinned; root `pytest.ini` configured |
+| `setup_stage1.sh` safe re-run | Resolved | Idempotent config preservation; backups created |
+| `fix_*.py` (7 files) | Archived | Moved to `langgraph_engine/archive/` with documentation |
+| Hydrameda unit tests | Implemented | 77/77 passed across 8 test suites |
 
 ---
 

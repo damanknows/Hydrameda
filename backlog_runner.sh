@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -u
 
-HYDRAMEDA_BIN="$HOME/.local/bin/hydrameda"
-BACKLOG_FILE="${1:-$HOME/hydrameda/backlog_tasks.txt}"
-VAULT_SUMMARY="$HOME/ObsidianVault/Lessons-Learned/Homecoming-Backlog-Summary.md"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$SCRIPT_DIR/scripts/hydrameda" ]; then
+    DEFAULT_HYDRAMEDA_BIN="$SCRIPT_DIR/scripts/hydrameda"
+elif [ -x "$HOME/.local/bin/hydrameda" ]; then
+    DEFAULT_HYDRAMEDA_BIN="$HOME/.local/bin/hydrameda"
+else
+    DEFAULT_HYDRAMEDA_BIN="$SCRIPT_DIR/scripts/hydrameda"
+fi
+HYDRAMEDA_BIN="${HYDRAMEDA_BIN:-$DEFAULT_HYDRAMEDA_BIN}"
+BACKLOG_FILE="${1:-$SCRIPT_DIR/backlog_tasks.txt}"
+VAULT_SUMMARY="${OBSIDIAN_VAULT_PATH:-$HOME/ObsidianVault}/Lessons-Learned/Homecoming-Backlog-Summary.md"
 COOLDOWN_SECONDS=12
 
 mkdir -p "$(dirname "$VAULT_SUMMARY")"
@@ -37,7 +45,7 @@ while IFS='|' read -r task_id prompt || [ -n "$task_id" ]; do
     echo "📝 Prompt: $prompt"
     echo "------------------------------------------------------------------"
 
-    if "$HYDRAMEDA_BIN" --task-id "$task_id" --prompt "$prompt"; then
+    if "$HYDRAMEDA_BIN" --task-id "$task_id" --prompt "$prompt" --auto-approve --trusted-policy "batch_backlog"; then
         if git -C "$HOME/hydrameda/worktrees/$task_id" log -1 --oneline >/dev/null 2>&1; then
             STATUS="✅ PASSED"
             PASSED_COUNT=$((PASSED_COUNT + 1))
