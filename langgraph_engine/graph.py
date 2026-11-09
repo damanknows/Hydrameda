@@ -18,46 +18,59 @@ Decomposed 12-Node Architecture:
 """
 import argparse
 import ast
+import logging
 import os
 import re
+import sqlite3
+
+logger = logging.getLogger(__name__)
+import subprocess
 import sys
 import time
-import subprocess
-import sqlite3
 from enum import Enum
 from pathlib import Path
-from typing import TypedDict, List, Dict, Any, Optional
+from typing import Any, TypedDict
+
 import httpx
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import interrupt, Command
+from langgraph.graph import END, StateGraph
+from langgraph.types import Command, interrupt
 from openai import OpenAI
-
-from preprocessor import extract_ast_skeleton, ObsidianRAG, create_isolated_worktree, validate_task_id
-
+from preprocessor import ObsidianRAG, create_isolated_worktree, extract_ast_skeleton, validate_task_id
 
 # Code Engine, HydraRouter, and Verification Engine integrations
 try:
     from code_engine import (
-        PatchEngine, ChangeManifest, FileChange, FileOperation, ValidationError,
-        RepositoryMapper, FileSelector, DiffGenerator,
-        RiskLevel, RiskAssessment, ApprovalDecision, ConsolidationReport,
-        GovernanceEngine, SafeConsolidator
+        ApprovalDecision,
+        ChangeManifest,
+        DiffGenerator,
+        FileChange,
+        FileOperation,
+        FileSelector,
+        GovernanceEngine,
+        PatchEngine,
+        RepositoryMapper,
+        SafeConsolidator,
     )
-    from hydra_router import get_router, ModelRole, OutputValidator, RouterResponse
-    from verification_engine import VerificationPipeline, CheckStatus, CheckResult, VerificationReport
+    from hydra_router import ModelRole, get_router
+    from verification_engine import VerificationPipeline
 except ImportError:
     # Handle sys.path when running graph.py standalone
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from code_engine import (
-        PatchEngine, ChangeManifest, FileChange, FileOperation, ValidationError,
-        RepositoryMapper, FileSelector, DiffGenerator,
-        RiskLevel, RiskAssessment, ApprovalDecision, ConsolidationReport,
-        GovernanceEngine, SafeConsolidator
+        ApprovalDecision,
+        ChangeManifest,
+        DiffGenerator,
+        FileChange,
+        FileOperation,
+        FileSelector,
+        GovernanceEngine,
+        PatchEngine,
+        RepositoryMapper,
+        SafeConsolidator,
     )
-    from hydra_router import get_router, ModelRole, OutputValidator, RouterResponse
-    from verification_engine import VerificationPipeline, CheckStatus, CheckResult, VerificationReport
+    from hydra_router import ModelRole, get_router
+    from verification_engine import VerificationPipeline
 
 # Strip proxy variables that interfere with local endpoints
 for env_var in (
@@ -126,9 +139,10 @@ def heal_module_imports(code: str, is_test_file: bool, module_code_for_test: str
 
     missing_lines = []
     for mod in STDLIB_AUTO_MODULES:
-        if re.search(rf"\b{mod}\.", code):
-            if not re.search(rf"^\s*(?:import\s+.*\b{mod}\b|from\s+{mod}\s+import)", code, re.MULTILINE):
-                missing_lines.append(f"import {mod}")
+        if re.search(rf"\b{mod}\.", code) and not re.search(
+            rf"^\s*(?:import\s+.*\b{mod}\b|from\s+{mod}\s+import)", code, re.MULTILINE
+        ):
+            missing_lines.append(f"import {mod}")
 
     if is_test_file and module_code_for_test:
         code = re.sub(r"^(\s*)from\s+\.module\s+import\b", r"\1from module import", code, flags=re.MULTILINE)
@@ -154,8 +168,8 @@ def heal_module_imports(code: str, is_test_file: bool, module_code_for_test: str
             ]
             if missing_exports and "*" not in already_imported:
                 missing_lines.append(f"from module import {', '.join(missing_exports)}")
-        except Exception:
-            pass
+        except (SyntaxError, ValueError) as exc:
+            logger.debug("Import auto-injection parse error: %s", exc)
 
     if not missing_lines:
         return code
@@ -169,11 +183,11 @@ def heal_module_imports(code: str, is_test_file: bool, module_code_for_test: str
     return "\n".join(lines_out) + "\n"
 
 
-def extract_files_from_response(raw_text: str) -> Dict[str, str]:
+def extract_files_from_response(raw_text: str) -> dict[str, str]:
     """Extracts code blocks tagged with <file name="...">...</file> from LLM output."""
     pattern = re.compile(r'<file\s+name=["\']([^"\']+)["\']\s*>(.*?)(?:</file>|$)', re.DOTALL)
     matches = pattern.findall(raw_text)
-    extracted: Dict[str, str] = {}
+    extracted: dict[str, str] = {}
     bt = chr(96) * 3
     for fname, content in matches:
         if "<file " in content:
@@ -217,7 +231,7 @@ class HydramedaState(TypedDict, total=False):
     task_state: str            # TaskState enum value
 
     # Node 1 & 2 outputs: analysis & context
-    task_analysis: Dict[str, Any]
+    task_analysis: dict[str, Any]
     vault_context: str
     ast_skeleton: str
 
@@ -233,45 +247,45 @@ class HydramedaState(TypedDict, total=False):
 
     # Node 7 & 8 outputs: worktree & files
     worktree_path: str
-    target_files: List[str]
-    current_files: Dict[str, str]
+    target_files: list[str]
+    current_files: dict[str, str]
 
     # Node 9 output: verification results
     verifier_output: str
     pytest_stderr: str
     verifier_exit_code: int
-    verification_report: Dict[str, Any]
+    verification_report: dict[str, Any]
 
     # Neuro-symbolic repair loop tracking (Max 3 repairs)
     repair_count: int
     retry_count: int           # Alias for backward compatibility
-    error_analysis: Dict[str, Any]
+    error_analysis: dict[str, Any]
 
     # Final outputs & telemetry
     status: str                # "PENDING" | "IN_PROGRESS" | "PASSED" | "FAILED" | "REJECTED" | "ERROR"
     commit_hash: str
     final_report: str
-    final_report_json: Dict[str, Any]
-    execution_report: Dict[str, Any]
-    structured_logs: List[Dict[str, Any]]
+    final_report_json: dict[str, Any]
+    execution_report: dict[str, Any]
+    structured_logs: list[dict[str, Any]]
     error: str
 
     # Governance, Manifest, and Consolidation
-    manifest: Dict[str, Any]
+    manifest: dict[str, Any]
     manifest_hash: str
     diff: str
-    risk_assessment: Dict[str, Any]
-    approval_decision: Dict[str, Any]
+    risk_assessment: dict[str, Any]
+    approval_decision: dict[str, Any]
     destructive_approved: bool
     merge_approved: bool
     require_consolidation_approval: bool
-    consolidation_report: Dict[str, Any]
+    consolidation_report: dict[str, Any]
     start_time: float
     end_time: float
 
 
 
-def log_event(state: HydramedaState, node: str, level: str, message: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+def log_event(state: HydramedaState, node: str, level: str, message: str, metadata: dict[str, Any] | None = None) -> None:
     """Appends a structured log entry to state['structured_logs'] and prints it."""
     logs = state.setdefault("structured_logs", [])
     entry = {
@@ -317,8 +331,8 @@ def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
             r = subprocess.run(["git", "-C", repo_path, "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=False)
             if r.returncode == 0 and r.stdout.strip():
                 starting_commit = r.stdout.strip()
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("Git rev-parse failed: %s", exc)
         state["starting_commit"] = starting_commit
 
         # Dynamic repository mapping (Requirement B3)
@@ -339,7 +353,7 @@ def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
                 for s in scored:
                     for d in s.get("symbols", {}).get("dependencies", []):
                         detected_deps.add(d)
-        except Exception as repo_err:
+        except Exception as repo_err:  # noqa: BLE001 - graceful fallback on arbitrary repository mapper failure
             log_event(state, node, "WARN", f"Repository mapping fallback: {repo_err}")
 
         # Extract symbols and intent keywords
@@ -350,7 +364,7 @@ def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
             "target_files": relevant_files if relevant_files else ["module.py", "test_module.py"],
             "relevant_files": relevant_files,
             "existing_tests": existing_tests,
-            "detected_dependencies": sorted(list(detected_deps)),
+            "detected_dependencies": sorted(detected_deps),
             "repository_files_count": repo_files_count,
             "constraints": [
                 "pure python standard library only" if not detected_deps else "use detected project dependencies",
@@ -363,7 +377,7 @@ def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
         state["task_analysis"] = analysis
         state["ast_skeleton"] = ast_map
         log_event(state, node, "SUCCESS", f"Task analyzed ({len(keywords)} keywords, {repo_files_count} repo files, AST map {len(ast_map)} chars)")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Failed to analyze spec: {e}")
         state["error"] = str(e)
         state["status"] = "ERROR"
@@ -386,7 +400,7 @@ def node_rag_retriever(state: HydramedaState) -> HydramedaState:
         vault_hits = rag.query(query, top_k=3)
         state["vault_context"] = vault_hits
         log_event(state, node, "SUCCESS", f"Retrieved Obsidian RAG context ({len(vault_hits)} chars)")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - graceful fallback on vault query failure
         log_event(state, node, "WARN", f"Obsidian RAG retrieval warning (using empty context): {e}")
         state["vault_context"] = ""
     return state
@@ -441,12 +455,12 @@ def node_architect(state: HydramedaState) -> HydramedaState:
         try:
             spec_path.parent.mkdir(parents=True, exist_ok=True)
             spec_path.write_text(spec, encoding="utf-8")
-        except Exception as write_err:
+        except OSError as write_err:
             log_event(state, node, "WARN", f"Could not write spec to vault: {write_err}")
 
         state["spec_md"] = spec
         log_event(state, node, "SUCCESS", f"Specification generated ({used_model}, {len(spec)} chars)")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Architect failure: {e}")
         state["error"] = str(e)
         state["status"] = "ERROR"
@@ -486,7 +500,7 @@ def node_prompt_optimizer(state: HydramedaState) -> HydramedaState:
         )
         state["optimized_prompt"] = prompt
         log_event(state, node, "SUCCESS", f"Prompt optimized ({len(prompt)} chars)")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Prompt optimizer failure: {e}")
         state["error"] = str(e)
         state["status"] = "ERROR"
@@ -602,7 +616,7 @@ def node_worktree_builder(state: HydramedaState) -> HydramedaState:
         wt_path = create_isolated_worktree(repo_path, task_id)
         state["worktree_path"] = wt_path
         log_event(state, node, "SUCCESS", f"Isolated worktree ready at {wt_path}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Worktree creation failed: {e}")
         state["error"] = str(e)
         state["status"] = "ERROR"
@@ -682,7 +696,7 @@ def node_code_builder(state: HydramedaState) -> HydramedaState:
         state["repair_count"] = 0
         state["retry_count"] = 0
         log_event(state, node, "SUCCESS", f"Built & import-healed artifacts ({used_model}): {files_written}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Code builder failure: {e}")
         state["error"] = str(e)
         state["status"] = "ERROR"
@@ -914,7 +928,7 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
         state["current_files"] = merged
         state["target_files"] = files_written
         log_event(state, node, "SUCCESS", f"Repaired artifacts ({used_model}, cycle {current_repairs}/3): {files_written}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Repair agent failure: {e}")
         state["error"] = str(e)
 
@@ -966,7 +980,7 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         # Check if human approval gate is required
         existing_decision_dict = state.get("approval_decision")
         needs_interrupt = False
-        decision: Optional[ApprovalDecision] = None
+        decision: ApprovalDecision | None = None
 
         if existing_decision_dict:
             decision = ApprovalDecision.from_dict(existing_decision_dict)
@@ -1091,9 +1105,10 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
     state["commit_hash"] = commit_hash
 
     # Invariant B1.10: Ensure graph state cannot claim COMPLETED while approval or verification remains pending
-    if state.get("task_state") == TaskState.COMPLETED.value:
-        if not is_verified or state.get("status") != "PASSED" or not (decision and decision.approved):
-            state["task_state"] = TaskState.FAILED.value
+    if state.get("task_state") == TaskState.COMPLETED.value and (
+        not is_verified or state.get("status") != "PASSED" or not (decision and decision.approved)
+    ):
+        state["task_state"] = TaskState.FAILED.value
 
     # Requirement B4: Comprehensive structured execution report
     files_created = []
@@ -1170,8 +1185,8 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
 
         rag = ObsidianRAG()
         rag.sync_vault()
-        log_event(state, node, "SUCCESS", f"Report written to Obsidian and LanceDB synced")
-    except Exception as obs_err:
+        log_event(state, node, "SUCCESS", "Report written to Obsidian and LanceDB synced")
+    except Exception as obs_err:  # noqa: BLE001 - graceful fallback on vault sync failure
         log_event(state, node, "WARN", f"Obsidian report sync warning: {obs_err}")
 
     return state
@@ -1220,7 +1235,7 @@ def route_after_verifier(state: HydramedaState) -> str:
 # Graph Construction
 # ============================================================================
 
-def build_hydrameda_graph(checkpointer: Optional[Any] = None, db_path: Optional[Path] = None):
+def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None = None):
     """Builds and compiles the 12-node cyclic neuro-symbolic LangGraph engine."""
     workflow = StateGraph(HydramedaState)
 

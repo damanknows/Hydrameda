@@ -13,14 +13,12 @@ Covers:
  8. Benchmark result schema, methodology distinctions, and archiving
 """
 import json
-import os
 import shutil
-import stat
 import subprocess
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -31,25 +29,22 @@ ENGINE_DIR = REPO_ROOT / "langgraph_engine"
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
+from langgraph.checkpoint.memory import MemorySaver
+
 from code_engine import (
-    FileOperation,
-    FileChange,
+    ApprovalDecision,
     ChangeManifest,
+    FileChange,
+    FileOperation,
+    GovernanceEngine,
     PatchEngine,
     PatchValidator,
     ValidationError,
-    PatchApplicationError,
-    RiskLevel,
-    ApprovalDecision,
-    GovernanceEngine,
-    SafeConsolidator,
 )
-from verification_engine.sandbox_runner import SandboxRunner, SandboxConfig
-from verification_engine.models import CheckStatus
 from evaluate_benchmark import write_reports
 from langgraph_engine import graph
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
+from verification_engine.models import CheckStatus
+from verification_engine.sandbox_runner import SandboxConfig, SandboxRunner
 
 
 @pytest.fixture

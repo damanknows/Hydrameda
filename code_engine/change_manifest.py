@@ -7,12 +7,13 @@ Defines:
 - ChangeManifest: Complete atomic multi-file changeset with validation metadata
 """
 from __future__ import annotations
+
 import enum
 import hashlib
 import json
 import time
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional, Any
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 
 class FileOperation(str, enum.Enum):
@@ -25,13 +26,13 @@ class FileOperation(str, enum.Enum):
 class FileChange:
     file_path: str                          # Relative path within target repository/worktree
     operation: FileOperation                # CREATE, MODIFY, DELETE
-    proposed_content: Optional[str] = None  # Full content for CREATE or MODIFY
-    original_content: Optional[str] = None  # Original content before modification
-    diff: Optional[str] = None              # Unified diff representation
-    original_hash: Optional[str] = None     # SHA256 of original file if existed
-    proposed_hash: Optional[str] = None     # SHA256 of new content
+    proposed_content: str | None = None  # Full content for CREATE or MODIFY
+    original_content: str | None = None  # Original content before modification
+    diff: str | None = None              # Unified diff representation
+    original_hash: str | None = None     # SHA256 of original file if existed
+    proposed_hash: str | None = None     # SHA256 of new content
     authorized: bool = False                # Explicit authorization (required for DELETE)
-    backup_path: Optional[str] = None       # Preserved rollback path
+    backup_path: str | None = None       # Preserved rollback path
 
     def __post_init__(self):
         if isinstance(self.operation, str):
@@ -41,13 +42,13 @@ class FileChange:
         if self.original_content is not None and self.original_hash is None:
             self.original_hash = hashlib.sha256(self.original_content.encode("utf-8")).hexdigest()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["operation"] = self.operation.value
         return d
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> FileChange:
+    def from_dict(cls, data: dict[str, Any]) -> FileChange:
         d = dict(data)
         d["operation"] = FileOperation(d["operation"])
         return cls(**d)
@@ -57,30 +58,30 @@ class FileChange:
 class ChangeManifest:
     task_id: str
     description: str
-    changes: List[FileChange] = field(default_factory=list)
+    changes: list[FileChange] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
-    allowed_base_path: Optional[str] = None
+    allowed_base_path: str | None = None
     applied: bool = False
-    unified_diff: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    unified_diff: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def add_change(self, change: FileChange) -> None:
         self.changes.append(change)
 
     @property
-    def target_files(self) -> List[str]:
+    def target_files(self) -> list[str]:
         return [c.file_path for c in self.changes]
 
     @property
-    def created_files(self) -> List[str]:
+    def created_files(self) -> list[str]:
         return [c.file_path for c in self.changes if c.operation == FileOperation.CREATE]
 
     @property
-    def modified_files(self) -> List[str]:
+    def modified_files(self) -> list[str]:
         return [c.file_path for c in self.changes if c.operation == FileOperation.MODIFY]
 
     @property
-    def deleted_files(self) -> List[str]:
+    def deleted_files(self) -> list[str]:
         return [c.file_path for c in self.changes if c.operation == FileOperation.DELETE]
 
     @property
@@ -92,7 +93,7 @@ class ChangeManifest:
         raw = "\n".join(payload).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "description": self.description,
@@ -109,7 +110,7 @@ class ChangeManifest:
         return json.dumps(self.to_dict(), indent=indent)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> ChangeManifest:
+    def from_dict(cls, data: dict[str, Any]) -> ChangeManifest:
         changes = [FileChange.from_dict(c) for c in data.get("changes", [])]
         return cls(
             task_id=data["task_id"],

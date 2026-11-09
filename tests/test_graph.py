@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Test suite for Hydrameda 12-Node Neuro-Symbolic LangGraph Engine.
 
@@ -11,9 +10,10 @@ Covers:
  6. Interrupted execution and resume via LangGraph Command
  7. Node exceptions handling
 """
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 # Ensure langgraph_engine is in sys.path
 ENGINE_DIR = Path(__file__).resolve().parent.parent / "langgraph_engine"
@@ -210,7 +210,7 @@ def test_human_rejection():
     config = {"configurable": {"thread_id": task_id}}
 
     # Run until approval_gate interrupt
-    res = app.invoke(initial_state, config)
+    app.invoke(initial_state, config)
     snapshot = app.get_state(config)
     assert len(snapshot.tasks[0].interrupts) > 0
 

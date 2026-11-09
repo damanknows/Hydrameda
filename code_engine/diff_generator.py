@@ -5,9 +5,10 @@ Generates standard Git / GNU unified diffs between original content and proposed
 Computes change statistics (additions, deletions, modified files).
 """
 from __future__ import annotations
+
 import difflib
-from typing import Dict, Any, Optional
-from .change_manifest import FileChange, ChangeManifest, FileOperation
+
+from .change_manifest import ChangeManifest, FileChange, FileOperation
 
 
 class DiffGenerator:
@@ -47,12 +48,12 @@ class DiffGenerator:
         return combined
 
     @staticmethod
-    def compute_diff_stats(diff_text: str) -> Dict[str, int]:
+    def compute_diff_stats(diff_text: str) -> dict[str, int]:
         """Calculates line additions and deletions from a unified diff."""
         additions = 0
         deletions = 0
         for line in diff_text.splitlines():
-            if line.startswith("+++") or line.startswith("---"):
+            if line.startswith(("+++", "---")):
                 continue
             if line.startswith("+"):
                 additions += 1

@@ -1,19 +1,12 @@
-#!/usr/bin/env python3
 """
 Unit and regression tests for Hydrameda Phase Operations, Portable Scripts,
 Worktree TTL Pruning, MCP Safety, and Multi-Interrupt Lifecycle.
 """
 import os
-import shutil
-import stat
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -22,11 +15,12 @@ ENGINE_DIR = REPO_ROOT / "langgraph_engine"
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
-from langgraph_engine import graph
-import mcp_server.server as mcp_srv
-from scripts.prune_worktrees import prune_worktrees
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
+
+import mcp_server.server as mcp_srv
+from langgraph_engine import graph
+from scripts.prune_worktrees import prune_worktrees
 
 
 # ============================================================================

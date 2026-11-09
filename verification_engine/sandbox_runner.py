@@ -1,14 +1,13 @@
 """Secure isolated sandbox execution runner."""
-import os
-import re
-import time
-import shutil
+import json
 import subprocess
-from pathlib import Path
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Callable
+from pathlib import Path
+from typing import Any
 
-from verification_engine.models import CheckResult, CheckStatus, CheckName
+from verification_engine.models import CheckName, CheckResult, CheckStatus
 
 
 @dataclass
@@ -34,10 +33,10 @@ class SandboxConfig:
     read_only_root: bool = True
     tmpfs_mount: str = "/tmp:size=256m,mode=1777,exec"
     timeout_seconds: float = 60.0
-    seccomp_profile: Optional[str] = None
-    allowed_mounts: List[str] = field(default_factory=list)
+    seccomp_profile: str | None = None
+    allowed_mounts: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serializes sandbox configuration for audit logs and verification records."""
         return {
             "image": self.image,
@@ -72,17 +71,16 @@ class SandboxConfig:
 
 class SecurityError(Exception):
     """Raised when a sandbox security constraint is violated."""
-    pass
 
 
 class SandboxRunner:
     """Executes commands inside a secure, rootless, network-isolated container."""
 
-    def __init__(self, config: Optional[SandboxConfig] = None):
+    def __init__(self, config: SandboxConfig | None = None):
         self.config = config or SandboxConfig()
-        self._mock_executor: Optional[Callable[..., Tuple[int, str, str]]] = None
+        self._mock_executor: Callable[..., tuple[int, str, str]] | None = None
 
-    def set_mock_executor(self, executor: Optional[Callable[..., Any]]) -> None:
+    def set_mock_executor(self, executor: Callable[..., Any] | None) -> None:
         """Sets a mock executor hook for isolated testing."""
         self._mock_executor = executor
 
@@ -91,7 +89,7 @@ class SandboxRunner:
         worktree_path: Path,
         command: str,
         check_name: CheckName | str,
-        custom_timeout: Optional[float] = None
+        custom_timeout: float | None = None
     ) -> CheckResult:
         """Runs a tool command (Ruff, Mypy, Bandit, Pytest) inside the secure sandbox."""
         name_str = check_name.value if isinstance(check_name, CheckName) else str(check_name)
@@ -240,7 +238,7 @@ class SandboxRunner:
                 diagnostic=f"Sandbox execution error: {e}"
             )
 
-    def get_host_isolation_metadata(self) -> Dict[str, Any]:
+    def get_host_isolation_metadata(self) -> dict[str, Any]:
         """Clearly distinguishes container non-root execution from rootless Docker host execution.
         
         Requirement A6.9:

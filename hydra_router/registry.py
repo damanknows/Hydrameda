@@ -1,12 +1,13 @@
 """Centralized model registry with role-based routing and fallback chains."""
 import os
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Any
+
 from dotenv import dotenv_values
 
-from hydra_router.exceptions import RoleNotFoundError, ConfigurationError
+from hydra_router.exceptions import RoleNotFoundError
 
 
 class ModelRole(str, Enum):
@@ -69,12 +70,12 @@ class ModelSpec:
     model: str
     provider: str
     api_key_env: str = ""
-    api_base: Optional[str] = None
+    api_base: str | None = None
     timeout: float = 30.0
     max_retries: int = 2
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
-    def resolve_api_key(self, env_dict: Optional[Dict[str, str]] = None) -> Optional[str]:
+    def resolve_api_key(self, env_dict: dict[str, str] | None = None) -> str | None:
         """Resolves API key from given dictionary or system environment."""
         if not self.api_key_env:
             return None
@@ -86,7 +87,7 @@ class ModelSpec:
 class RoleConfig:
     """Configured model fallback chain and generation defaults for a role."""
     role: ModelRole
-    models: List[ModelSpec]
+    models: list[ModelSpec]
     default_temperature: float = 0.1
     default_max_tokens: int = 4096
 
@@ -94,16 +95,17 @@ class RoleConfig:
 class ModelRegistry:
     """Central registry mapping roles to prioritized model fallback chains."""
 
-    def __init__(self, root_dir: Optional[Path] = None):
+    def __init__(self, root_dir: Path | None = None):
         self.root_dir = root_dir or Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda"))
-        self._roles: Dict[ModelRole, RoleConfig] = {}
+        self._roles: dict[ModelRole, RoleConfig] = {}
         self._load_defaults()
 
-    def _get_env_vars(self) -> Dict[str, str]:
+    def _get_env_vars(self) -> dict[str, str]:
         env_file = self.root_dir / ".env"
         loaded = dotenv_values(env_file) if env_file.exists() else {}
-        # Merge system environment taking precedence
-        return {**loaded, **os.environ}
+        merged: dict[str, str] = {k: v for k, v in loaded.items() if v is not None}
+        merged.update(dict(os.environ))
+        return merged
 
     def _load_defaults(self) -> None:
         """Sets up default provider chains for each role."""
@@ -189,7 +191,7 @@ class ModelRegistry:
             raise RoleNotFoundError(f"Role '{normalized}' not configured in registry.")
         return self._roles[normalized]
 
-    def get_active_models(self, role: ModelRole | str, require_api_key: bool = True) -> List[ModelSpec]:
+    def get_active_models(self, role: ModelRole | str, require_api_key: bool = True) -> list[ModelSpec]:
         """Returns the fallback chain of models for a role, filtered by available credentials."""
         config = self.get_role_config(role)
         env = self._get_env_vars()

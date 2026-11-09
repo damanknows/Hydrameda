@@ -1,20 +1,17 @@
 """Custom exceptions for HydraRouter."""
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 
 class HydraRouterError(Exception):
     """Base exception for all HydraRouter operations."""
-    pass
 
 
 class RoleNotFoundError(HydraRouterError):
     """Raised when an unknown role is requested."""
-    pass
 
 
 class ConfigurationError(HydraRouterError):
     """Raised when router or model configuration is invalid."""
-    pass
 
 
 class ModelProviderError(HydraRouterError):
@@ -24,10 +21,10 @@ class ModelProviderError(HydraRouterError):
         model: str,
         provider: str,
         message: str,
-        status_code: Optional[int] = None,
+        status_code: int | None = None,
         is_rate_limit: bool = False,
         is_timeout: bool = False,
-        original_error: Optional[Exception] = None
+        original_error: Exception | None = None
     ):
         super().__init__(f"[{provider}/{model}] {message}")
         self.model = model
@@ -41,7 +38,7 @@ class ModelProviderError(HydraRouterError):
 
 class AllModelsFailedError(HydraRouterError):
     """Raised when all candidate models in a role's fallback chain fail."""
-    def __init__(self, role: str, attempts: List[Dict[str, Any]]):
+    def __init__(self, role: str, attempts: list[dict[str, Any]]):
         self.role = role
         self.attempts = attempts
         summary = "; ".join(
@@ -53,7 +50,7 @@ class AllModelsFailedError(HydraRouterError):
 
 class StructuredOutputValidationError(HydraRouterError):
     """Raised when LLM output fails schema or structural validation."""
-    def __init__(self, message: str, raw_output: str, schema_name: Optional[str] = None):
+    def __init__(self, message: str, raw_output: str, schema_name: str | None = None):
         super().__init__(f"Output validation failed for {schema_name or 'schema'}: {message}")
         self.raw_output = raw_output
         self.schema_name = schema_name

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Comprehensive hardening and regression test suite for Phase 0 and Phase 1 sprints.
 
@@ -15,17 +14,14 @@ Covers:
   Part D: Full End-to-End acceptance run in disposable Git repository
 """
 
-import hmac
-import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -36,28 +32,22 @@ ENGINE_DIR = REPO_ROOT / "langgraph_engine"
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
+from langgraph.checkpoint.memory import MemorySaver
+
+import mcp_server.server as mcp_srv
 from code_engine import (
-    FileOperation,
-    FileChange,
-    ChangeManifest,
-    PatchEngine,
-    DiffGenerator,
-    RiskLevel,
-    RiskAssessment,
     ApprovalDecision,
-    ConsolidationReport,
+    ChangeManifest,
+    FileChange,
+    FileOperation,
     GovernanceEngine,
+    PatchEngine,
     SafeConsolidator,
 )
 from langgraph_engine import graph
-from langgraph_engine.preprocessor import validate_task_id, create_isolated_worktree
-from verification_engine.sandbox_runner import SandboxConfig, SandboxRunner, SecurityError
-from verification_engine.models import VerificationReport
-import mcp_server.server as mcp_srv
+from langgraph_engine.preprocessor import create_isolated_worktree, validate_task_id
 from scripts.prune_worktrees import prune_worktrees
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
-
+from verification_engine.sandbox_runner import SandboxConfig, SandboxRunner, SecurityError
 
 # ============================================================================
 # PART A1: Cryptographic Approval Auditing & Strict Types
@@ -214,7 +204,7 @@ def test_untrusted_auto_approval_pauses_graph():
     config = {"configurable": {"thread_id": task_id}}
     try:
         # Graph execution will pause at approval_gate because trusted_policy is untrusted
-        result = app.invoke(state, config=config)
+        app.invoke(state, config=config)
         snapshot = app.get_state(config)
         assert len(snapshot.tasks) > 0
         # Interrupt was triggered
@@ -325,9 +315,11 @@ def test_worktree_collision_rejection(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    with patch("langgraph_engine.preprocessor.WORKTREES_DIR", wt_root):
-        with pytest.raises(FileExistsError, match="collision"):
-            create_isolated_worktree(str(repo), "existing-task")
+    with (
+        patch("langgraph_engine.preprocessor.WORKTREES_DIR", wt_root),
+        pytest.raises(FileExistsError, match="collision"),
+    ):
+        create_isolated_worktree(str(repo), "existing-task")
 
 
 def test_pruning_script_protects_active_and_locked_worktrees(tmp_path):
@@ -388,7 +380,7 @@ def test_atomic_patch_temporary_write_failure(tmp_path):
     from code_engine.patch_engine import PatchApplicationError
 
     # Inject exception during temp write
-    with patch("code_engine.patch_engine.tempfile.mkstemp", side_effect=IOError("Simulated disk error")):
+    with patch("code_engine.patch_engine.tempfile.mkstemp", side_effect=OSError("Simulated disk error")):
         with pytest.raises((PatchApplicationError, IOError), match="Simulated disk error"):
             patch_engine.apply_manifest(manifest)
 

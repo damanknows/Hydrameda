@@ -8,11 +8,14 @@ Capabilities:
 - Symbol dependency graph detection (internal module imports and external packages).
 """
 from __future__ import annotations
+
 import ast
-import os
+import logging
 import re
 from pathlib import Path
-from typing import Dict, List, Set, Any, Optional
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     from tree_sitter_language_pack import get_parser
@@ -35,7 +38,7 @@ class RepositoryMapper:
         if not self.repo_path.exists():
             raise FileNotFoundError(f"Repository path does not exist: {self.repo_path}")
 
-    def list_files(self, relative: bool = True, extensions: Optional[Set[str]] = None) -> List[str]:
+    def list_files(self, relative: bool = True, extensions: set[str] | None = None) -> list[str]:
         """Lists all non-ignored project files."""
         files = []
         for p in sorted(self.repo_path.rglob("*")):
@@ -49,7 +52,7 @@ class RepositoryMapper:
             files.append(str(rel) if relative else str(p))
         return files
 
-    def extract_file_symbols(self, file_path: str | Path) -> Dict[str, Any]:
+    def extract_file_symbols(self, file_path: str | Path) -> dict[str, Any]:
         """Extracts imports, classes, functions, and docstrings from a Python file."""
         target = (self.repo_path / file_path).resolve() if not Path(file_path).is_absolute() else Path(file_path)
         if not target.exists() or not target.is_file():
@@ -58,7 +61,7 @@ class RepositoryMapper:
         source_bytes = target.read_bytes()
         source_text = source_bytes.decode("utf-8", errors="ignore")
 
-        symbols: Dict[str, Any] = {
+        symbols: dict[str, Any] = {
             "file": str(target.relative_to(self.repo_path) if target.is_relative_to(self.repo_path) else target),
             "imports": [],
             "classes": [],
@@ -96,38 +99,38 @@ class RepositoryMapper:
                             fn_name = source_bytes[fn_name_node.start_byte:fn_name_node.end_byte].decode("utf-8", errors="ignore")
                             symbols["functions"].append(fn_name)
                 return symbols
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - graceful fallback to stdlib ast parser
+                logger.debug("Tree-sitter parse failed for %s: %s", target, exc)
 
         # Fallback to stdlib ast for Python
         if target.suffix == ".py":
             try:
-                tree = ast.parse(source_text)
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        for alias in node.names:
+                py_tree = ast.parse(source_text)
+                for ast_node in ast.walk(py_tree):
+                    if isinstance(ast_node, ast.Import):
+                        for alias in ast_node.names:
                             symbols["imports"].append(f"import {alias.name}")
                             symbols["dependencies"].append(alias.name.split(".")[0])
-                    elif isinstance(node, ast.ImportFrom) and node.module:
-                        names = ", ".join(a.name for a in node.names)
-                        symbols["imports"].append(f"from {node.module} import {names}")
-                        symbols["dependencies"].append(node.module.split(".")[0])
-                    elif isinstance(node, ast.ClassDef):
-                        methods = [n.name for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-                        symbols["classes"].append({"name": node.name, "methods": methods})
-                    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        symbols["functions"].append(node.name)
-            except Exception as e:
+                    elif isinstance(ast_node, ast.ImportFrom) and ast_node.module:
+                        names = ", ".join(a.name for a in ast_node.names)
+                        symbols["imports"].append(f"from {ast_node.module} import {names}")
+                        symbols["dependencies"].append(ast_node.module.split(".")[0])
+                    elif isinstance(ast_node, ast.ClassDef):
+                        methods = [n.name for n in ast_node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                        symbols["classes"].append({"name": ast_node.name, "methods": methods})
+                    elif isinstance(ast_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        symbols["functions"].append(ast_node.name)
+            except (SyntaxError, ValueError) as e:
                 symbols["error"] = f"AST parse warning: {e}"
 
         symbols["dependencies"] = sorted(set(symbols["dependencies"]))
         return symbols
 
-    def map_repository(self, max_chars: int = 12000) -> Dict[str, Any]:
+    def map_repository(self, max_chars: int = 12000) -> dict[str, Any]:
         """Generates a comprehensive structured map of the repository."""
         py_files = self.list_files(extensions={".py"})
         file_maps = []
-        all_deps: Set[str] = set()
+        all_deps: set[str] = set()
 
         for f in py_files:
             syms = self.extract_file_symbols(f)

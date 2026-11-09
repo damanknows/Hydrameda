@@ -1,10 +1,10 @@
 """Token usage, latency tracking, and structured model failure logging."""
+import logging
 import time
 import uuid
-import logging
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any
+from dataclasses import asdict, dataclass, field
 from threading import Lock
+from typing import Any
 
 logger = logging.getLogger("hydrameda.hydra_router")
 
@@ -20,11 +20,11 @@ class ModelCallMetrics:
     completion_tokens: int = 0
     total_tokens: int = 0
     success: bool = False
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
+    error_type: str | None = None
+    error_message: str | None = None
     timestamp: float = field(default_factory=time.time)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -33,7 +33,7 @@ class RouterTelemetry:
 
     def __init__(self):
         self._lock = Lock()
-        self._history: List[ModelCallMetrics] = []
+        self._history: list[ModelCallMetrics] = []
         self._fallback_count: int = 0
 
     def record_call(self, metrics: ModelCallMetrics) -> None:
@@ -75,7 +75,7 @@ class RouterTelemetry:
             role, from_model, to_model, reason
         )
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Calculates global aggregation statistics."""
         with self._lock:
             calls = list(self._history)
@@ -107,7 +107,7 @@ class RouterTelemetry:
             }
         }
 
-    def get_role_summary(self, role: str) -> Dict[str, Any]:
+    def get_role_summary(self, role: str) -> dict[str, Any]:
         """Calculates metrics for a specific role."""
         with self._lock:
             calls = [c for c in self._history if c.role == role]

@@ -14,20 +14,20 @@ Guarantees:
 8. Safe Rollback: Changes are reverted from disk backups if rejected or if approval is stale.
 """
 from __future__ import annotations
+
 import enum
-import hashlib
 import json
 import logging
 import os
 import subprocess
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any, ClassVar
 
-from .change_manifest import ChangeManifest, FileChange, FileOperation
-from .patch_engine import PatchEngine
+from .change_manifest import ChangeManifest
 from .diff_generator import DiffGenerator
+from .patch_engine import PatchEngine
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +44,15 @@ class RiskLevel(str, enum.Enum):
 class RiskAssessment:
     """Evaluation of risk, impact, and safety boundaries for a proposed change-set."""
     level: RiskLevel
-    reasons: List[str] = field(default_factory=list)
-    destructive_operations: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    destructive_operations: list[str] = field(default_factory=list)
     total_files: int = 0
-    created_files: List[str] = field(default_factory=list)
-    modified_files: List[str] = field(default_factory=list)
-    deleted_files: List[str] = field(default_factory=list)
+    created_files: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
+    deleted_files: list[str] = field(default_factory=list)
     verification_passed: bool = True
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["level"] = self.level.value
         return d
@@ -62,21 +62,21 @@ class RiskAssessment:
 class ApprovalDecision:
     """Structured human approval decision bound to an exact change-set hash and task ID."""
     approved: bool = False
-    approved_manifest_hash: Optional[str] = None
-    task_id: Optional[str] = None
+    approved_manifest_hash: str | None = None
+    task_id: str | None = None
     approver: str = "human"
     approval_mode: str = "interactive"  # "interactive" | "explicit_async" | "trusted_policy"
     authorization_source: str = "human"
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
     destructive_approved: bool = False
     merge_approved: bool = False
-    comments: Optional[str] = None
+    comments: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> ApprovalDecision:
+    def from_dict(cls, data: dict[str, Any]) -> ApprovalDecision:
         approved_val = data.get("approved")
         # STRICT REQUIREMENT: Require actual boolean approval value. Reject strings ("false", "yes", "true", "approved").
         if not isinstance(approved_val, bool):
@@ -111,17 +111,17 @@ class ConsolidationReport:
     status: str  # "CONSOLIDATED" | "COMMITTED_WORKTREE_ONLY" | "REJECTED" | "ROLLED_BACK" | "STALE_APPROVAL_REJECTED" | "VERIFICATION_FAILED"
     approved: bool
     merged_to_main: bool
-    worktree_commit: Optional[str] = None
-    main_commit: Optional[str] = None
-    final_diff: Optional[str] = None
-    manifest_hash: Optional[str] = None
-    risk_level: Optional[str] = None
-    files_affected: List[str] = field(default_factory=list)
+    worktree_commit: str | None = None
+    main_commit: str | None = None
+    final_diff: str | None = None
+    manifest_hash: str | None = None
+    risk_level: str | None = None
+    files_affected: list[str] = field(default_factory=list)
     summary: str = ""
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def to_markdown(self) -> str:
@@ -157,7 +157,7 @@ class ConsolidationReport:
 class GovernanceEngine:
     """Evaluates risk, formats review displays, and cryptographically validates approvals."""
 
-    CRITICAL_FILE_PATTERNS = [
+    CRITICAL_FILE_PATTERNS: ClassVar[list[str]] = [
         "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
         "Dockerfile", "docker-compose.yml", ".github/", ".gitignore"
     ]
@@ -165,7 +165,7 @@ class GovernanceEngine:
     @classmethod
     def assess_risk(cls, manifest: ChangeManifest, verification_passed: bool = True) -> RiskAssessment:
         """Computes risk classification based on file operations, file counts, critical paths, and verification status."""
-        reasons: List[str] = []
+        reasons: list[str] = []
         deleted = manifest.deleted_files
         created = manifest.created_files
         modified = manifest.modified_files
@@ -220,7 +220,7 @@ class GovernanceEngine:
         spec_md: str,
         manifest: ChangeManifest,
         risk: RiskAssessment,
-        verification_summary: Optional[Dict[str, Any]] = None
+        verification_summary: dict[str, Any] | None = None
     ) -> str:
         """Builds a rich markdown display for human review in LangGraph interrupt."""
         if not manifest.unified_diff:
@@ -278,12 +278,12 @@ class GovernanceEngine:
     @classmethod
     def validate_approval(
         cls,
-        decision: Optional[ApprovalDecision],
+        decision: ApprovalDecision | None,
         manifest: ChangeManifest,
         verification_passed: bool = True
-    ) -> Tuple[bool, List[str]]:
+    ) -> tuple[bool, list[str]]:
         """Cryptographically validates the approval decision against the exact manifest hash and security constraints."""
-        reasons: List[str] = []
+        reasons: list[str] = []
 
         if decision is None:
             return False, ["Missing approval decision: approval data is required."]
@@ -374,7 +374,7 @@ class SafeConsolidator:
                             f"Rollback incomplete for files: {manifest.metadata.get('rollback_failures')}. "
                             f"Backups preserved at: {manifest.metadata.get('backup_dir')}"
                         )
-                except Exception as rollback_err:
+                except Exception as rollback_err:  # noqa: BLE001 - Safely report any error during worktree rollback
                     val_reasons.append(f"Rollback error: {rollback_err}")
 
             return ConsolidationReport(
@@ -408,7 +408,7 @@ class SafeConsolidator:
         if wt and wt != main_repo and wt.exists() and (wt / ".git").exists():
             try:
                 # Requirement A5.3: Check worktree status before consolidation
-                status_proc = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True, check=True)
+                subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True, check=True)
 
                 # Requirement A5.6: Associate verification record with exact commit SHA and manifest hash
                 ver_record = {
@@ -424,11 +424,11 @@ class SafeConsolidator:
                 ver_file.write_text(json.dumps(ver_record, indent=2), encoding="utf-8")
 
                 # Requirement A5.1: Validate all Git return codes
-                add_proc = subprocess.run(["git", "-C", str(wt), "add", "-A"], capture_output=True, text=True, check=True)
+                subprocess.run(["git", "-C", str(wt), "add", "-A"], capture_output=True, text=True, check=True)
                 status_after_add = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"], capture_output=True, text=True, check=True)
                 if status_after_add.stdout.strip():
                     commit_msg = f"feat({manifest.task_id}): {manifest.description or 'verified autonomous build'}"
-                    commit_proc = subprocess.run(
+                    subprocess.run(
                         ["git", "-C", str(wt), "commit", "-m", commit_msg],
                         env=git_env,
                         capture_output=True, text=True, check=True
@@ -472,7 +472,7 @@ class SafeConsolidator:
                     merge_res = subprocess.run(
                         ["git", "-C", str(main_repo), "merge", "--no-ff", branch_name, "-m", f"Merge {branch_name} into main"],
                         env=git_env,
-                        capture_output=True, text=True
+                        capture_output=True, text=True, check=False
                     )
                     if merge_res.returncode == 0:
                         rev_main = subprocess.run(["git", "-C", str(main_repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True)
@@ -496,7 +496,7 @@ class SafeConsolidator:
                             files_affected=manifest.target_files,
                             summary=f"Merge to main failed: {conflict_msg}"
                         )
-                except Exception as merge_err:
+                except Exception as merge_err:  # noqa: BLE001 - Safely abort and report merge failure
                     subprocess.run(["git", "-C", str(main_repo), "merge", "--abort"], capture_output=True, check=False)
                     return ConsolidationReport(
                         task_id=manifest.task_id,

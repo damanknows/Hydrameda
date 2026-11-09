@@ -2,27 +2,21 @@
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any
 
-from verification_engine.models import (
-    CheckResult,
-    CheckStatus,
-    CheckName,
-    VerificationReport
-)
+from verification_engine.models import CheckName, CheckResult, CheckStatus, VerificationReport
+from verification_engine.sandbox_runner import SandboxRunner
 from verification_engine.static_checks import (
-    run_syntax_check,
     run_ast_structural_check,
+    run_dependency_security_check,
     run_import_resolution_check,
-    run_dependency_security_check
+    run_syntax_check,
 )
-from verification_engine.sandbox_runner import SandboxRunner, SandboxConfig
 
 
 class VerificationPipeline:
     """Orchestrates independent, deterministic verification across all 8 checks."""
 
-    def __init__(self, sandbox_runner: Optional[SandboxRunner] = None):
+    def __init__(self, sandbox_runner: SandboxRunner | None = None):
         self.runner = sandbox_runner or SandboxRunner()
 
     def run_all_checks(
@@ -33,7 +27,7 @@ class VerificationPipeline:
     ) -> VerificationReport:
         """Executes all 8 deterministic verification checks in strict order."""
         total_start = time.perf_counter()
-        checks: Dict[str, CheckResult] = {}
+        checks: dict[str, CheckResult] = {}
         wt = Path(worktree_path).resolve()
 
         # Phase 1: Local Static & AST Checks
@@ -98,7 +92,7 @@ class VerificationPipeline:
     def _build_report(
         self,
         task_id: str,
-        checks: Dict[str, CheckResult],
+        checks: dict[str, CheckResult],
         total_start: float
     ) -> VerificationReport:
         total_duration = (time.perf_counter() - total_start) * 1000.0

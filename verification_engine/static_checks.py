@@ -3,9 +3,8 @@ import ast
 import sys
 import time
 from pathlib import Path
-from typing import Set, Dict, List, Tuple
 
-from verification_engine.models import CheckResult, CheckStatus, CheckName
+from verification_engine.models import CheckName, CheckResult, CheckStatus
 
 # Standard library modules in Python 3.10+
 STDLIB_MODULES = getattr(sys, "stdlib_module_names", frozenset([
@@ -122,7 +121,7 @@ def run_import_resolution_check(worktree_path: Path) -> CheckResult:
         )
 
     # Index available module stems and their declared top-level symbols
-    available_modules: Dict[str, Set[str]] = {}
+    available_modules: dict[str, set[str]] = {}
     for f in py_files:
         rel = f.relative_to(worktree_path)
         stem = f.stem
@@ -151,25 +150,25 @@ def run_import_resolution_check(worktree_path: Path) -> CheckResult:
         rel = f.relative_to(worktree_path)
         try:
             tree = ast.parse(f.read_text(encoding="utf-8", errors="replace"), filename=str(rel))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
+            for item_node in ast.walk(tree):
+                if isinstance(item_node, ast.Import):
+                    for alias in item_node.names:
                         root_mod = alias.name.split(".")[0]
                         if root_mod not in STDLIB_MODULES and root_mod not in ALLOWED_PACKAGES and root_mod not in available_modules:
-                            unresolved.append(f"{rel}:{node.lineno}: Cannot resolve imported module '{alias.name}'")
-                elif isinstance(node, ast.ImportFrom):
-                    mod_name = node.module or ""
+                            unresolved.append(f"{rel}:{item_node.lineno}: Cannot resolve imported module '{alias.name}'")
+                elif isinstance(item_node, ast.ImportFrom):
+                    mod_name = item_node.module or ""
                     root_mod = mod_name.split(".")[0]
                     # If importing from a local module in the worktree
                     if mod_name in available_modules or root_mod in available_modules:
                         target_symbols = available_modules.get(mod_name) or available_modules.get(root_mod, set())
-                        for alias in node.names:
+                        for alias in item_node.names:
                             if alias.name != "*" and target_symbols and alias.name not in target_symbols:
                                 unresolved.append(
-                                    f"{rel}:{node.lineno}: Symbol '{alias.name}' not found in module '{mod_name}' (available: {sorted(list(target_symbols))[:5]})"
+                                    f"{rel}:{item_node.lineno}: Symbol '{alias.name}' not found in module '{mod_name}' (available: {sorted(list(target_symbols))[:5]})"
                                 )
                     elif root_mod not in STDLIB_MODULES and root_mod not in ALLOWED_PACKAGES:
-                        unresolved.append(f"{rel}:{node.lineno}: Cannot resolve module '{mod_name}'")
+                        unresolved.append(f"{rel}:{item_node.lineno}: Cannot resolve module '{mod_name}'")
         except Exception as e:
             unresolved.append(f"{rel}: Import analysis error: {e}")
 

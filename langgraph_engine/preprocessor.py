@@ -3,7 +3,8 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any
+
 import lancedb
 from fastembed import TextEmbedding
 from tree_sitter_language_pack import get_parser
@@ -39,7 +40,7 @@ def extract_ast_skeleton(repo_path: str, max_chars: int = 5000) -> str:
         return f"# Error: Path {repo_path} does not exist."
 
     py_parser = get_parser("python")
-    lines: List[str] = [f"# AST REPO MAP: {root.name}"]
+    lines: list[str] = [f"# AST REPO MAP: {root.name}"]
 
     for file_path in sorted(root.rglob("*.py")):
         rel_parts = file_path.relative_to(root).parts
@@ -49,7 +50,7 @@ def extract_ast_skeleton(repo_path: str, max_chars: int = 5000) -> str:
             source_bytes = file_path.read_bytes()
             tree = py_parser.parse(source_bytes)
             rel_path = file_path.relative_to(root)
-            file_sigs: List[str] = []
+            file_sigs: list[str] = []
 
             for node in tree.root_node.children:
                 if node.type in ("import_statement", "import_from_statement"):
@@ -72,7 +73,7 @@ def extract_ast_skeleton(repo_path: str, max_chars: int = 5000) -> str:
             if file_sigs:
                 lines.append(f"\n## File: {rel_path}")
                 lines.extend(file_sigs)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - graceful fallback on AST extraction error
             lines.append(f"\n## File: {file_path.name} (Parse warning: {e})")
 
     return "\n".join(lines)[:max_chars]
@@ -100,7 +101,7 @@ class ObsidianRAG:
         texts = [f.read_text(encoding="utf-8", errors="ignore")[:3000] for f in md_files]
         embeddings = list(self.embedder.embed(texts))
 
-        records: List[Dict[str, Any]] = []
+        records: list[dict[str, Any]] = []
         for f, text, vec in zip(md_files, texts, embeddings):
             records.append({
                 "path": str(f.relative_to(self.vault_path)),
@@ -115,7 +116,7 @@ class ObsidianRAG:
             tbl = self.db.open_table(self.table_name)
             try:
                 tbl.merge_insert("path").when_matched_update_all().when_not_matched_insert_all().execute(records)
-            except Exception:
+            except Exception:  # noqa: BLE001 - Fallback to table overwrite if schema changed
                 # Fallback to table creation if schema changed
                 self.db.create_table(self.table_name, data=records, mode="overwrite")
         return len(records)
@@ -125,7 +126,7 @@ class ObsidianRAG:
         if self.table_name not in existing_tables:
             self.sync_vault()
         tbl = self.db.open_table(self.table_name)
-        q_vec = list(self.embedder.embed([query_text]))[0].tolist()
+        q_vec = next(iter(self.embedder.embed([query_text]))).tolist()
         results = tbl.search(q_vec).limit(top_k).to_list()
         return "\n\n".join([f"--- Vault Note: {r['path']} ---\n{r['content']}" for r in results])
 
@@ -142,7 +143,7 @@ def validate_task_id(task_id: str) -> str:
     - Null bytes and non-alphanumeric/underscore/hyphen characters
     """
     if not isinstance(task_id, str):
-        raise ValueError(f"Task ID must be a string, got {type(task_id).__name__}")
+        raise TypeError(f"Task ID must be a string, got {type(task_id).__name__}")
     task_id = task_id.strip()
     if not task_id:
         raise ValueError("Task ID cannot be empty")

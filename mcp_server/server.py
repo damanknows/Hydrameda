@@ -5,20 +5,20 @@ Exposes Obsidian Vault RAG, Tree-sitter AST Maps, and Verified Git Worktrees to 
 """
 import os
 import re
-import sys
-import time
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 try:
-    from mcp.server.mcpserver import MCPServer as FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[attr-defined]
 except ImportError:
     try:
-        from fastmcp import FastMCP
+        from fastmcp import FastMCP  # type: ignore[no-redef]
     except ImportError:
         try:
-            from mcp.server.fastmcp import FastMCP
+            from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore[no-redef]
         except ImportError:
             sys.stderr.write("FATAL: MCP library not found. Install with `pip install mcp` or `pip install fastmcp`\n")
             sys.exit(1)
@@ -27,7 +27,8 @@ HYDRAMEDA_ROOT = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda")).re
 ENGINE_DIR = HYDRAMEDA_ROOT / "langgraph_engine"
 sys.path.insert(0, str(ENGINE_DIR))
 sys.path.insert(0, str(HYDRAMEDA_ROOT))
-from preprocessor import extract_ast_skeleton, ObsidianRAG, validate_task_id
+from preprocessor import ObsidianRAG, extract_ast_skeleton, validate_task_id
+
 from code_engine import PatchValidator, ValidationError
 
 OBSIDIAN_VAULT = Path(os.getenv("OBSIDIAN_VAULT_PATH", Path.home() / "ObsidianVault"))
@@ -94,7 +95,7 @@ def list_verified_worktrees(verified_only: bool = False) -> str:
                 import json
                 v_data = json.loads(ver_file.read_text(encoding="utf-8"))
                 is_verified = (v_data.get("overall_status") == "passed")
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 is_verified = False
         else:
             is_verified = "verified autonomous build" in last_commit.lower()
@@ -165,7 +166,7 @@ def get_task_status(task_id: str) -> str:
         for t in snapshot.tasks:
             for intr in getattr(t, "interrupts", []):
                 val = intr.value if isinstance(intr.value, dict) else {}
-                out.append(f"⚠️ Awaiting Human Approval:")
+                out.append("⚠️ Awaiting Human Approval:")
                 out.append(f"  - Action: `{val.get('action')}`")
                 out.append(f"  - Manifest Hash: `{val.get('manifest_hash')}`")
                 out.append(f"  - Question: {val.get('question')}")
@@ -229,7 +230,7 @@ def merge_verified_worktree(task_id: str, target_dir: str, module_rename: str = 
             import json
             v_data = json.loads(ver_file.read_text(encoding="utf-8"))
             is_verified = (v_data.get("overall_status") == "passed")
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             is_verified = False
     else:
         is_verified = "verified autonomous build" in last_commit.lower()

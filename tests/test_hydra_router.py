@@ -1,8 +1,8 @@
 """Unit and integration tests for Centralized Multi-Model HydraRouter."""
-import os
 import sys
 import time
 from pathlib import Path
+
 import pytest
 from pydantic import BaseModel
 
@@ -10,20 +10,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from hydra_router import (
+    AllModelsFailedError,
     HydraRouter,
+    ModelRegistry,
     ModelRole,
     ModelSpec,
-    RoleConfig,
-    ModelRegistry,
-    ModelCallMetrics,
-    RouterTelemetry,
     OutputValidator,
-    AllModelsFailedError,
+    RoleConfig,
     RoleNotFoundError,
+    RouterTelemetry,
     StructuredOutputValidationError,
-    get_router
+    get_router,
 )
-
 
 # ============================================================================
 # 1. Registry & Role-Based Model Selection Tests
@@ -234,7 +232,7 @@ def test_rate_limit_and_timeout_failover(monkeypatch):
         model = kwargs.get("model")
         if "rate-limited" in model:
             call_counts["prov-a"] += 1
-            raise Exception("RateLimitError: 429 Too Many Requests")
+            raise RuntimeError("RateLimitError: 429 Too Many Requests")
         call_counts["prov-b"] += 1
         class MockChoice:
             message = type("Msg", (), {"content": "<file name=\"fix.py\">\n# fixed\n</file>"})()

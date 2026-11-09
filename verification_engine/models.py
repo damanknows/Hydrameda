@@ -1,8 +1,8 @@
 """Models and data structures for independent, deterministic verification."""
 import json
+from dataclasses import asdict, dataclass, field
 from enum import Enum
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any
+from typing import Any
 
 
 class CheckStatus(str, Enum):
@@ -34,10 +34,10 @@ class CheckResult:
     stdout: str = ""
     stderr: str = ""
     duration_ms: float = 0.0
-    diagnostic: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    diagnostic: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["status"] = self.status.value
         return d
@@ -48,11 +48,11 @@ class VerificationReport:
     """Comprehensive structured verification report."""
     task_id: str
     overall_status: str  # "passed" | "failed"
-    checks: Dict[str, CheckResult] = field(default_factory=dict)
+    checks: dict[str, CheckResult] = field(default_factory=dict)
     total_duration_ms: float = 0.0
     summary: str = ""
-    failure_diagnostics: Dict[str, Any] = field(default_factory=dict)
-    sandbox_config: Dict[str, Any] = field(default_factory=dict)
+    failure_diagnostics: dict[str, Any] = field(default_factory=dict)
+    sandbox_config: dict[str, Any] = field(default_factory=dict)
 
     def is_passed(self) -> bool:
         """Determines if verification passed cleanly.
@@ -70,7 +70,7 @@ class VerificationReport:
                 return False
         return self.overall_status == "passed"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "overall_status": self.overall_status,

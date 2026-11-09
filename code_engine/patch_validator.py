@@ -15,11 +15,11 @@ Security & Integrity Rules:
 8. TOCTOU defense: Resolves and validates all paths before reading, modifying, or deleting.
 """
 from __future__ import annotations
+
 import hashlib
-import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+
 from .change_manifest import ChangeManifest, FileChange, FileOperation
 
 PROTECTED_PATHS = {
@@ -30,7 +30,6 @@ PROTECTED_PATHS = {
 
 class ValidationError(Exception):
     """Raised when a patch or file change violates safety constraints."""
-    pass
 
 
 class PatchValidator:
@@ -58,7 +57,7 @@ class PatchValidator:
         clean_path = rel_path.strip()
 
         # 3. Deny absolute paths (POSIX and Windows drive / UNC)
-        if clean_path.startswith("/") or clean_path.startswith("\\") or re.match(r"^[a-zA-Z]:", clean_path):
+        if clean_path.startswith(("/", "\\")) or re.match(r"^[a-zA-Z]:", clean_path):
             raise ValidationError(f"Path traversal detected: absolute paths not allowed: '{clean_path}'")
 
         p = Path(clean_path)
@@ -152,7 +151,7 @@ class PatchValidator:
 
         return target_path
 
-    def validate_manifest(self, manifest: ChangeManifest) -> List[str]:
+    def validate_manifest(self, manifest: ChangeManifest) -> list[str]:
         """Validates all changes in a manifest. Returns list of verified target paths or raises ValidationError."""
         verified_paths = []
         for change in manifest.changes:

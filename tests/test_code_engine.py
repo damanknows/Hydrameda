@@ -12,22 +12,23 @@ Verifies:
 - Atomic rollback on write error and manual rollback.
 - Git unified diff accuracy and line statistics.
 """
-import pytest
 import shutil
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from code_engine.change_manifest import ChangeManifest, FileChange, FileOperation
+from code_engine.change_manifest import FileChange, FileOperation
 from code_engine.diff_generator import DiffGenerator
-from code_engine.patch_validator import PatchValidator, ValidationError
-from code_engine.patch_engine import PatchEngine, PatchApplicationError
-from code_engine.repository_mapper import RepositoryMapper
 from code_engine.file_selector import FileSelector
+from code_engine.patch_engine import PatchEngine
+from code_engine.patch_validator import PatchValidator, ValidationError
+from code_engine.repository_mapper import RepositoryMapper
 
 
 @pytest.fixture

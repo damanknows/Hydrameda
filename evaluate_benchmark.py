@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 DEFAULT_REPO = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda")).resolve()
 DEFAULT_BENCH_DIR = DEFAULT_REPO / "benchmarks"
@@ -100,7 +101,7 @@ def write_reports(
     avg_time = round(sum(r["elapsed_sec"] for r in results) / max(total, 1), 2)
 
     # Category breakdown
-    categories = {}
+    categories: dict[str, dict[str, Any]] = {}
     for r in results:
         cat = r.get("category", "General")
         c = categories.setdefault(cat, {

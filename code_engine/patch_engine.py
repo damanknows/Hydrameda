@@ -9,22 +9,23 @@ Guarantees:
 5. Isolation: Operates strictly inside target Git worktree; rejects symlinks escaping worktree.
 """
 from __future__ import annotations
+
 import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any
+
 from .change_manifest import ChangeManifest, FileChange, FileOperation
-from .patch_validator import PatchValidator, ValidationError
 from .diff_generator import DiffGenerator
+from .patch_validator import PatchValidator, ValidationError
 
 logger = logging.getLogger(__name__)
 
 
 class PatchApplicationError(Exception):
     """Raised when patch application fails during write or backup."""
-    pass
 
 
 class PatchEngine:
@@ -36,7 +37,7 @@ class PatchEngine:
             raise FileNotFoundError(f"Target worktree not found: {self.worktree}")
         self.validator = PatchValidator(self.worktree, allow_delete=allow_delete)
 
-    def prepare_manifest(self, changes: List[Dict[str, Any]], description: str = "", task_id: str = "") -> ChangeManifest:
+    def prepare_manifest(self, changes: list[dict[str, Any]], description: str = "", task_id: str = "") -> ChangeManifest:
         """Constructs a ChangeManifest, validating every path BEFORE reading content or calculating diffs."""
         manifest = ChangeManifest(
             task_id=task_id or "unassigned",
@@ -82,7 +83,7 @@ class PatchEngine:
         # Step 1: Pre-validation of all changes before any disk write
         self.validator.validate_manifest(manifest)
 
-        applied_changes: List[FileChange] = []
+        applied_changes: list[FileChange] = []
         backup_dir = Path(tempfile.mkdtemp(prefix=f"hydrameda_backup_{manifest.task_id}_"))
 
         try:
@@ -175,7 +176,7 @@ class PatchEngine:
             )
             return False
 
-    def _rollback_applied(self, changes: List[FileChange]) -> Tuple[bool, Dict[str, str], List[str]]:
+    def _rollback_applied(self, changes: list[FileChange]) -> tuple[bool, dict[str, str], list[str]]:
         """Reverts applied changes in reverse order.
         
         Guarantees:
@@ -183,13 +184,13 @@ class PatchEngine:
         - Tracks restoration success per file.
         - Returns failure flag and mapping of failed files to error reasons.
         """
-        failed_files: Dict[str, str] = {}
-        restored_files: List[str] = []
+        failed_files: dict[str, str] = {}
+        restored_files: list[str] = []
 
         for change in reversed(changes):
             try:
                 target_path = self.validator.validate_path_safety(change.file_path)
-            except Exception as val_err:
+            except (ValidationError, OSError) as val_err:
                 failed_files[change.file_path] = f"Validation failed during rollback: {val_err}"
                 continue
 
@@ -205,7 +206,7 @@ class PatchEngine:
                         restored_files.append(change.file_path)
                     else:
                         failed_files[change.file_path] = f"Backup file missing or unreadable: {change.backup_path}"
-            except Exception as exc:
+            except OSError as exc:
                 failed_files[change.file_path] = str(exc)
                 logger.error(f"Rollback error on '{change.file_path}': {exc}")
 

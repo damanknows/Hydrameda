@@ -11,8 +11,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Dict, Any
-
+from typing import Any
 
 HYDRAMEDA_ROOT = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda")).resolve()
 WORKTREES_DIR = HYDRAMEDA_ROOT / "worktrees"
@@ -24,7 +23,7 @@ def prune_worktrees(
     dry_run: bool = False,
     unverified_only: bool = False,
     force: bool = False
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Prunes worktrees older than max_age_days from repo_path / 'worktrees'."""
     repo = Path(repo_path).resolve()
     wt_dir = repo / "worktrees"
@@ -44,8 +43,9 @@ def prune_worktrees(
         try:
             mtime = item.stat().st_mtime
             age_days = round((now - mtime) / 86400.0, 2)
-        except Exception:
+        except OSError:
             age_days = 0.0
+            mtime = now
 
         is_stale = (now - mtime) > cutoff_seconds
 
@@ -67,7 +67,7 @@ def prune_worktrees(
                 import json
                 v_data = json.loads(ver_file.read_text(encoding="utf-8"))
                 is_verified = v_data.get("overall_status") == "passed"
-            except Exception:
+            except (json.JSONDecodeError, OSError):
                 is_verified = False
         else:
             commit_res = subprocess.run(
@@ -104,7 +104,7 @@ def prune_worktrees(
                 if item.exists():
                     shutil.rmtree(item, ignore_errors=True)
                 pruned.append({"task_id": task_id, "age_days": age_days, "verified": is_verified, "pruned": True})
-            except Exception as e:
+            except (subprocess.SubprocessError, OSError) as e:
                 kept.append({"task_id": task_id, "age_days": age_days, "error": str(e)})
 
     if not dry_run:

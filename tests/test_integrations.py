@@ -1,7 +1,7 @@
 """Tests for MCP tools, Gateway security, and Preprocessor AST extraction."""
-import os
 import sys
 from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 
@@ -10,7 +10,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "langgraph_engine"))
 
 from preprocessor import extract_ast_skeleton
-from hydrameda_openai_gateway import verify_token
+
 import mcp_server.server as mcp_srv
 
 
