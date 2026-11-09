@@ -380,9 +380,11 @@ def test_atomic_patch_temporary_write_failure(tmp_path):
     from code_engine.patch_engine import PatchApplicationError
 
     # Inject exception during temp write
-    with patch("code_engine.patch_engine.tempfile.mkstemp", side_effect=OSError("Simulated disk error")):
-        with pytest.raises((PatchApplicationError, IOError), match="Simulated disk error"):
-            patch_engine.apply_manifest(manifest)
+    with (
+        patch("code_engine.patch_engine.tempfile.mkstemp", side_effect=OSError("Simulated disk error")),
+        pytest.raises((PatchApplicationError, OSError), match="Simulated disk error"),
+    ):
+        patch_engine.apply_manifest(manifest)
 
     # Target file must retain original content!
     assert target_file.read_text() == "original_content = True\n"
@@ -408,7 +410,7 @@ def test_multi_file_patch_third_fails_triggers_rollback(tmp_path):
 
     patch_engine = PatchEngine(target_worktree=tmp_path)
 
-    with pytest.raises(Exception):
+    with pytest.raises(PatchApplicationError):
         patch_engine.apply_manifest(manifest)
 
     # files 1 and 2 must retain initial content
@@ -580,7 +582,8 @@ def test_hmac_sign_and_verify():
             [sys.executable, "-m", "pytest", str(wt_path / "test_hmac_signer.py")],
             cwd=str(wt_path),
             capture_output=True,
-            text=True
+            text=True,
+            check=False
         )
         output = f"{result.stdout}\n{result.stderr}\n--- [1/4] Ruff Static Check ---\n--- [2/4] Mypy Type Check ---\n--- [4/4] Pytest Unit Suite ---"
         return result.returncode, output
