@@ -19,5 +19,6 @@ __pycache__/
 # Dynamic Worktrees, Vector DBs & Logs
 worktrees/
 *.log
+logs/
 lancedb_data/
 .python-3.12/
