@@ -27,6 +27,14 @@ PROTECTED_PATHS = {
     ".ssh", ".bashrc", ".profile", ".gitconfig"
 }
 
+# External framework packages that must never be shadowed or created as local stubs
+PROTECTED_SHADOW_PACKAGES = {
+    "litellm", "langgraph", "tree_sitter_language_pack", "pytest", "ruff",
+    "mypy", "bandit", "pydantic", "fastapi", "uvicorn", "cryptography",
+    "jwt", "requests", "httpx", "dotenv", "langsmith", "anthropic",
+    "openai", "google", "numpy", "torch", "pandas", "scipy"
+}
+
 
 class ValidationError(Exception):
     """Raised when a patch or file change violates safety constraints."""
@@ -119,6 +127,14 @@ class PatchValidator:
         exists = target_path.exists()
 
         if change.operation == FileOperation.CREATE:
+            parts = Path(change.file_path).parts
+            top_part = parts[0].replace(".py", "") if parts else ""
+            stem = Path(change.file_path).stem
+            if top_part in PROTECTED_SHADOW_PACKAGES or (len(parts) == 1 and stem in PROTECTED_SHADOW_PACKAGES):
+                raise ValidationError(
+                    f"Creating fake or shadowing third-party package/module '{change.file_path}' is strictly prohibited."
+                )
+
             if exists:
                 raise ValidationError(f"Cannot CREATE existing file '{change.file_path}'. Use MODIFY instead.")
             if change.proposed_content is None:

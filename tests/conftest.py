@@ -1,4 +1,5 @@
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ def clean_test_worktrees():
             for p in wt_dir.glob("task-*"):
                 if p.is_dir():
                     shutil.rmtree(p, ignore_errors=True)
+        subprocess.run(["git", "-C", str(ROOT), "worktree", "prune"], check=False, capture_output=True)
 
     _cleanup()
     yield

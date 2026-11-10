@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from threading import Lock
 from typing import Any
 
+from hydra_router.exceptions import redact_credentials
+
 logger = logging.getLogger("hydrameda.hydra_router")
 
 
@@ -38,6 +40,8 @@ class RouterTelemetry:
 
     def record_call(self, metrics: ModelCallMetrics) -> None:
         """Records completed model invocation metrics."""
+        if metrics.error_message:
+            metrics.error_message = redact_credentials(metrics.error_message)
         with self._lock:
             self._history.append(metrics)
 
@@ -68,11 +72,12 @@ class RouterTelemetry:
 
     def record_fallback(self, role: str, from_model: str, to_model: str, reason: str) -> None:
         """Logs and tracks a fallback event."""
+        redacted_reason = redact_credentials(reason)
         with self._lock:
             self._fallback_count += 1
         logger.info(
             "[HydraRouter Fallback] Role: %s | Switching from '%s' to '%s' | Reason: %s",
-            role, from_model, to_model, reason
+            role, from_model, to_model, redacted_reason
         )
 
     def get_summary(self) -> dict[str, Any]:

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Hydrameda Security & Reliability Remediation Sprint Test Suite.
 
@@ -323,7 +322,7 @@ def test_benchmark_result_schema_and_archiving():
 
     try:
         # Run 1: Write reports
-        summary1 = write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
+        write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
 
         assert results_path.exists()
         assert report_md.exists()
@@ -340,7 +339,7 @@ def test_benchmark_result_schema_and_archiving():
         assert data1["summary"]["environment"]["git_commit"] == "abc1234"
 
         # Run 2: Write reports again -> must archive previous run
-        summary2 = write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
+        write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
         archived_files = list(archive_dir.glob("benchmark_results_*.json"))
         assert len(archived_files) >= 1, "Previous benchmark run was not archived before writing!"
 

@@ -31,12 +31,23 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypedDict
 
-import httpx
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
-from openai import OpenAI
 from preprocessor import ObsidianRAG, create_isolated_worktree, extract_ast_skeleton, validate_task_id
+
+try:
+    from fidelity import (
+        TaskRequirements,
+        extract_task_requirements,
+        validate_specification_fidelity,
+    )
+except ImportError:
+    from langgraph_engine.fidelity import (
+        TaskRequirements,
+        extract_task_requirements,
+        validate_specification_fidelity,
+    )
 
 # Code Engine, HydraRouter, and Verification Engine integrations
 try:
@@ -81,13 +92,6 @@ for env_var in (
     os.environ.pop(env_var, None)
 
 HYDRAMEDA_ROOT = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda")).resolve()
-LITELLM_URL = os.getenv("LITELLM_URL", "http://127.0.0.1:4000/v1")
-
-client = OpenAI(
-    base_url=LITELLM_URL,
-    api_key=os.getenv("LITELLM_MASTER_KEY", "sk-hydrameda-local-key"),
-    http_client=httpx.Client(trust_env=False, timeout=90.0)
-)
 
 
 # Pluggable execution handlers (allows deterministic mocking in test suites)
@@ -239,6 +243,15 @@ class HydramedaState(TypedDict, total=False):
     spec_md: str
     optimized_prompt: str
 
+    # Specification fidelity & constraint enforcement (Fidelity stage)
+    task_requirements: dict[str, Any]
+    spec_validation_attempts: int
+    specification_fidelity_status: str       # "PASSED" | "FAILED"
+    specification_constraint_violations: list[str]
+    specification_rejection_reason: str
+    fidelity_feedback: str
+    original_requirements_preserved: bool
+
     # Node 5 & 6 outputs: governance & routing
     approval_status: str       # "PENDING" | "APPROVED" | "REJECTED"
     approval_mode: str         # "trusted_policy", "interactive_interrupt", "auto_approved"
@@ -276,6 +289,10 @@ class HydramedaState(TypedDict, total=False):
     diff: str
     risk_assessment: dict[str, Any]
     approval_decision: dict[str, Any]
+    specification_approval_status: str
+    specification_approved_at: float
+    consolidation_status: str
+    consolidation_skip_reason: str
     destructive_approved: bool
     merge_approved: bool
     require_consolidation_approval: bool
@@ -376,6 +393,11 @@ def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
 
         state["task_analysis"] = analysis
         state["ast_skeleton"] = ast_map
+
+        # Structured task requirement extraction (Fidelity stage)
+        reqs = extract_task_requirements(prompt, analysis)
+        state["task_requirements"] = reqs.to_dict()
+
         log_event(state, node, "SUCCESS", f"Task analyzed ({len(keywords)} keywords, {repo_files_count} repo files, AST map {len(ast_map)} chars)")
     except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Failed to analyze spec: {e}")
@@ -409,15 +431,33 @@ def node_rag_retriever(state: HydramedaState) -> HydramedaState:
 def node_architect(state: HydramedaState) -> HydramedaState:
     """Node 3: Generates formal Markdown technical specification.
 
-    Inputs:  user_prompt, task_analysis, vault_context, ast_skeleton, task_id
+    Inputs:  user_prompt, task_analysis, vault_context, ast_skeleton, task_id, task_requirements, fidelity_feedback
     Outputs: spec_md
     """
     node = "architect"
     state["task_state"] = TaskState.PLANNING.value
+    state.setdefault("spec_validation_attempts", 0)
     log_event(state, node, "INFO", "Synthesizing architectural specification via hybrid-architect...")
     try:
+        reqs = TaskRequirements.from_dict(state.get("task_requirements"))
+        prohibited = reqs.prohibited_capabilities
+        prohibitions_str = ""
+        if prohibited:
+            prohibitions_str = "STRICT PROHIBITION DIRECTIVE: Do NOT implement or introduce:\n" + "\n".join(f" - {p}" for p in prohibited) + "\nSatisfy ONLY the requested capabilities.\n"
+
+        feedback_str = ""
+        if state.get("fidelity_feedback"):
+            feedback_str = (
+                f"PREVIOUS ATTEMPT REJECTED DUE TO CONSTRAINT VIOLATIONS:\n"
+                f"{state.get('fidelity_feedback')}\n"
+                "You MUST eliminate all violations listed above.\n\n"
+            )
+
         user_prompt_lower = (state.get("user_prompt", "")).lower()
-        if any(lib in user_prompt_lower for lib in ["flask", "yaml", "pyyaml", "cryptography", "jwt", "requests", "fastapi"]):
+        all_candidate_libs = ["flask", "yaml", "pyyaml", "cryptography", "requests", "fastapi", "jwt"]
+        candidate_libs = [lib for lib in all_candidate_libs if not any(lib in p.lower() for p in prohibited)]
+
+        if any(lib in user_prompt_lower for lib in candidate_libs):
             lib_constraint = "1. Rely on Python standard library and explicitly requested packages (e.g. Flask, PyYAML, cryptography, pytest). Avoid unrequested external dependencies.\n"
         else:
             lib_constraint = "1. Use ONLY Python standard library modules (hashlib, hmac, os, secrets, base64, json, time, re, typing, dataclasses) and pytest.\n"
@@ -435,17 +475,20 @@ def node_architect(state: HydramedaState) -> HydramedaState:
 
         prompt = (
             f"You are Hydrameda's Epistemic Architect.\n"
+            f"{feedback_str}"
             f"User Prompt: {state.get('user_prompt')}\n\n"
             f"Relevant Obsidian Notes:\n{state.get('vault_context')}\n\n"
             f"Codebase AST Map:\n{state.get('ast_skeleton')}\n\n"
             f"Repository Context:{repo_context_str}\n\n"
             "Write a concise technical specification (in Markdown) defining required functions/classes and unit tests.\n"
             "STRICT DESIGN CONSTRAINTS:\n"
+            "0. PRIMARY DIRECTIVE: Strictly satisfy the User Prompt. Background notes and vault context are reference material ONLY; do NOT substitute, expand, or alter the user's requested scope, protocol, or design based on background notes.\n"
+            f"{prohibitions_str}"
             f"{lib_constraint}"
             "2. Raise ONLY built-in `ValueError` or `TypeError` (or custom exceptions that subclass `ValueError`).\n"
             "3. Do NOT write `raise NotImplementedError` stubs in your specification."
         )
-        spec, used_model = call_llm(ModelRole.PLANNER.value, prompt, max_tokens=4096)
+        spec, used_model = call_llm(ModelRole.ARCHITECT.value, prompt, max_tokens=4096)
 
         if not spec:
             spec = f"# Spec Generation Failed for {state.get('task_id')}"
@@ -469,10 +512,76 @@ def node_architect(state: HydramedaState) -> HydramedaState:
     return state
 
 
+def node_spec_validator(state: HydramedaState) -> HydramedaState:
+    """Node 3.5: Deterministic specification fidelity validation stage.
+
+    Validates that the generated architectural specification complies strictly
+    with user intent, negative constraints, and scope boundaries before reaching
+    the human approval gate or code builder. Bounded to a maximum of 3 attempts.
+
+    Inputs:  user_prompt, spec_md, task_requirements, vault_context, spec_validation_attempts
+    Outputs: spec_validation_attempts, specification_fidelity_status,
+             specification_constraint_violations, specification_rejection_reason,
+             fidelity_feedback, original_requirements_preserved
+    """
+    node = "spec_validator"
+    attempts = state.get("spec_validation_attempts", 0) + 1
+    state["spec_validation_attempts"] = attempts
+
+    log_event(state, node, "INFO", f"Validating specification fidelity (attempt {attempts}/3)...")
+    prompt = state.get("user_prompt", "")
+    spec = state.get("spec_md", "")
+    reqs = TaskRequirements.from_dict(state.get("task_requirements"))
+    vault_ctx = state.get("vault_context", "")
+
+    report = validate_specification_fidelity(
+        user_prompt=prompt,
+        spec_md=spec,
+        task_requirements=reqs,
+        vault_context=vault_ctx
+    )
+
+    if report.passed:
+        state["specification_fidelity_status"] = "PASSED"
+        state["specification_constraint_violations"] = []
+        state["specification_rejection_reason"] = ""
+        state["fidelity_feedback"] = ""
+        state["original_requirements_preserved"] = True
+        log_event(state, node, "SUCCESS", f"Specification fidelity verified on attempt {attempts}/3.")
+    else:
+        state["specification_fidelity_status"] = "FAILED"
+        state["specification_constraint_violations"] = report.violations
+        state["specification_rejection_reason"] = "; ".join(report.violations)
+        state["fidelity_feedback"] = report.actionable_feedback
+        state["original_requirements_preserved"] = False
+        log_event(state, node, "WARN", f"Specification fidelity rejected (attempt {attempts}/3): {'; '.join(report.violations)}")
+
+        if attempts >= 3:
+            state["task_state"] = TaskState.FAILED.value
+            state["status"] = "FAILED"
+            state["error"] = f"Specification fidelity validation failed after 3 attempts: {state['specification_rejection_reason']}"
+            log_event(state, node, "ERROR", "Max specification validation attempts reached (3/3). Halting execution.")
+
+    return state
+
+
+def route_after_spec_validator(state: HydramedaState) -> str:
+    """Conditional edge after spec_validator: routes to prompt_optimizer, architect retry, or consolidator halt."""
+    if state.get("specification_fidelity_status") == "PASSED":
+        return "prompt_optimizer"
+
+    attempts = state.get("spec_validation_attempts", 0)
+    if attempts < 3:
+        return "architect"
+
+    # Max attempts reached: halt execution and route directly to consolidator (skip approval gate & code builder)
+    return "consolidator"
+
+
 def node_prompt_optimizer(state: HydramedaState) -> HydramedaState:
     """Node 4: Compiles and optimizes the code generation prompt with epistemic rules.
 
-    Inputs:  spec_md, task_analysis, ast_skeleton
+    Inputs:  spec_md, task_analysis, ast_skeleton, task_requirements
     Outputs: optimized_prompt
     """
     node = "prompt_optimizer"
@@ -481,10 +590,19 @@ def node_prompt_optimizer(state: HydramedaState) -> HydramedaState:
     try:
         spec = state.get("spec_md", "")
         prompt_lower = (state.get("user_prompt", "") + " " + spec).lower()
-        if any(lib in prompt_lower for lib in ["flask", "yaml", "pyyaml", "cryptography", "jwt", "requests", "fastapi"]):
+        reqs = TaskRequirements.from_dict(state.get("task_requirements"))
+        prohibited = reqs.prohibited_capabilities
+        all_candidate_libs = ["flask", "yaml", "pyyaml", "cryptography", "requests", "fastapi", "jwt"]
+        candidate_libs = [lib for lib in all_candidate_libs if not any(lib in p.lower() for p in prohibited)]
+
+        if any(lib in prompt_lower for lib in candidate_libs):
             lib_rule = "2. Rely on Python standard library and explicitly requested packages (e.g. Flask, PyYAML, cryptography, pytest). Avoid unrequested external dependencies.\n"
         else:
             lib_rule = "2. Prefer Python standard library modules (hashlib, hmac, os, secrets, base64, json, time, re, typing, dataclasses) and pytest.\n"
+
+        prohibitions_rule = ""
+        if prohibited:
+            prohibitions_rule = "CRITICAL PROHIBITIONS (DO NOT IMPLEMENT):\n" + "\n".join(f"- {p}" for p in prohibited) + "\n"
 
         prompt = (
             f"You are Hydrameda's Autonomous Repository Coder.\n"
@@ -492,6 +610,7 @@ def node_prompt_optimizer(state: HydramedaState) -> HydramedaState:
             "CRITICAL RULES FOR REPOSITORY CODE & TESTS:\n"
             "1. Write COMPLETE, FULLY IMPLEMENTED production code. NEVER leave `raise NotImplementedError` or `pass` stubs!\n"
             f"{lib_rule}"
+            f"{prohibitions_rule}"
             "3. Multi-file generation is fully supported. Specify each created or modified file with its clean relative path in <file name=\"...\"> tags.\n"
             "4. For tests, ensure all imports of local project modules use top-level or clean package imports.\n"
             "5. Output ONLY raw <file> XML tags without markdown code fences:\n"
@@ -537,6 +656,8 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
     if auto_approve:
         if trusted_policy in ALLOWED_TRUSTED_POLICIES:
             state["approval_status"] = "APPROVED"
+            state["specification_approval_status"] = "APPROVED"
+            state["specification_approved_at"] = time.time()
             state["task_state"] = TaskState.PLANNING.value
             state["approval_mode"] = "auto_approved"
             state["authorization_source"] = f"policy:{trusted_policy}"
@@ -573,7 +694,10 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
     else:
         approved = False
 
-    state["approval_status"] = "APPROVED" if approved else "REJECTED"
+    status_str = "APPROVED" if approved else "REJECTED"
+    state["approval_status"] = status_str
+    state["specification_approval_status"] = status_str
+    state["specification_approved_at"] = time.time()
     state["task_state"] = TaskState.PLANNING.value if approved else TaskState.CANCELLED.value
     log_event(state, node, "SUCCESS" if approved else "WARN", f"Human approval decision: {state['approval_status']}")
     return state
@@ -755,7 +879,11 @@ def node_sandbox_verifier(state: HydramedaState) -> HydramedaState:
         return state
 
     pipeline = VerificationPipeline()
-    report = pipeline.run_all_checks(worktree_path=wt, task_id=state.get("task_id", "task-verify"))
+    report = pipeline.run_all_checks(
+        worktree_path=wt,
+        task_id=state.get("task_id", "task-verify"),
+        target_files=state.get("target_files")
+    )
 
     state["verification_report"] = report.to_dict()
     state["verifier_output"] = report.summary
@@ -848,6 +976,12 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
         guidance = analysis.get("actionable_guidance", "Fix the failing tests.")
         diag_snippet = state.get("pytest_stderr", "")
 
+        reqs = TaskRequirements.from_dict(state.get("task_requirements"))
+        prohibited = reqs.prohibited_capabilities
+        prohibitions_rule = ""
+        if prohibited:
+            prohibitions_rule = "CRITICAL PROHIBITIONS (DO NOT INTRODUCE DURING REPAIR):\n" + "\n".join(f"- {p}" for p in prohibited) + "\n"
+
         prompt = (
             f"You are Hydrameda's Autonomous Repair Agent.\n"
             f"Specification:\n{state.get('spec_md')}\n\n"
@@ -859,7 +993,9 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
             "CRITICAL REPAIR RULES:\n"
             "1. Fix the specific failures identified above without breaking working code.\n"
             "2. In `test_module.py`, ALWAYS use direct top-level imports: `from module import ...`.\n"
-            "3. Output ONLY raw <file> XML tags without markdown code fences:\n"
+            f"{prohibitions_rule}"
+            "3. NEVER create stub or mock files for external or framework libraries (e.g. litellm.py, langgraph/, tree_sitter_language_pack/). Repair ONLY the target task code.\n"
+            "4. Output ONLY raw <file> XML tags without markdown code fences:\n"
             '<file name="module.py">\n# repaired complete python code\n</file>\n\n'
             '<file name="test_module.py">\n# repaired unit tests\n</file>'
         )
@@ -927,7 +1063,7 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
 
         state["current_files"] = merged
         state["target_files"] = files_written
-        log_event(state, node, "SUCCESS", f"Repaired artifacts ({used_model}, cycle {current_repairs}/3): {files_written}")
+        log_event(state, node, "INFO", f"Applied repair patch ({used_model}, cycle {current_repairs}/3): {files_written}. Awaiting verification...")
     except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Repair agent failure: {e}")
         state["error"] = str(e)
@@ -951,6 +1087,10 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
     node = "consolidator"
     log_event(state, node, "INFO", "Consolidating memory, reports, and version control...")
     commit_hash = "N/A"
+    decision: ApprovalDecision | None = None
+    existing_decision_dict = state.get("approval_decision")
+    if existing_decision_dict:
+        decision = ApprovalDecision.from_dict(existing_decision_dict)
 
     wt_str = state.get("worktree_path")
     wt = Path(wt_str).resolve() if wt_str and wt_str.strip() else None
@@ -978,12 +1118,8 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         state["risk_assessment"] = risk.to_dict()
 
         # Check if human approval gate is required
-        existing_decision_dict = state.get("approval_decision")
         needs_interrupt = False
-        decision: ApprovalDecision | None = None
-
-        if existing_decision_dict:
-            decision = ApprovalDecision.from_dict(existing_decision_dict)
+        if decision:
             if decision.approved_manifest_hash != manifest.manifest_hash:
                 needs_interrupt = True  # Prior approval is stale!
         elif not state.get("auto_approve", False) or state.get("require_consolidation_approval", False):
@@ -1084,17 +1220,24 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         state["diff"] = consolidation_report.final_diff or ""
 
         if not consolidation_report.approved:
+            state["consolidation_status"] = "HALTED"
+            state["consolidation_skip_reason"] = consolidation_report.summary
             state["status"] = consolidation_report.status
             state["approval_status"] = "REJECTED"
             state["task_state"] = TaskState.CANCELLED.value if consolidation_report.status in ("REJECTED", "CANCELLED") else TaskState.FAILED.value
             commit_hash = "N/A"
             log_event(state, node, "WARN", f"Consolidation halted: {consolidation_report.summary}")
         else:
+            state["consolidation_status"] = "COMPLETED"
             commit_hash = consolidation_report.worktree_commit or "committed"
             state["task_state"] = TaskState.COMPLETED.value
             log_event(state, node, "SUCCESS", f"Consolidation completed ({consolidation_report.status}): {consolidation_report.summary}")
 
     else:
+        consolidation_status = "NOT_REACHED"
+        consolidation_skip_reason = f"Verification did not pass (status={state.get('status')}, verified={is_verified})"
+        state["consolidation_status"] = consolidation_status
+        state["consolidation_skip_reason"] = consolidation_skip_reason
         log_event(state, node, "INFO", f"Skipping consolidation: status={state.get('status')}, verified={is_verified}")
         commit_hash = "N/A"
         if state.get("status") in ("REJECTED", "CANCELLED"):
@@ -1140,6 +1283,14 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         "task_id": state.get("task_id", ""),
         "task_state": state.get("task_state", TaskState.FAILED.value),
         "status": state.get("status", "UNKNOWN"),
+        "specification_fidelity_status": state.get("specification_fidelity_status", "NOT_EVALUATED"),
+        "specification_validation_attempts": state.get("spec_validation_attempts", 0),
+        "specification_constraint_violations": state.get("specification_constraint_violations", []),
+        "specification_rejection_reason": state.get("specification_rejection_reason", ""),
+        "original_requirements_preserved": state.get("original_requirements_preserved", True),
+        "specification_approval_status": state.get("specification_approval_status") or state.get("approval_status"),
+        "consolidation_status": state.get("consolidation_status", "COMPLETED" if (decision and decision.approved) else "HALTED"),
+        "consolidation_skip_reason": state.get("consolidation_skip_reason"),
         "repo_path": state.get("repo_path") or str(HYDRAMEDA_ROOT),
         "starting_commit": state.get("starting_commit", "N/A"),
         "final_commit": commit_hash,
@@ -1239,10 +1390,11 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
     """Builds and compiles the 12-node cyclic neuro-symbolic LangGraph engine."""
     workflow = StateGraph(HydramedaState)
 
-    # Register all 12 nodes
+    # Register nodes
     workflow.add_node("spec_analyzer", node_spec_analyzer)
     workflow.add_node("rag_retriever", node_rag_retriever)
     workflow.add_node("architect", node_architect)
+    workflow.add_node("spec_validator", node_spec_validator)
     workflow.add_node("prompt_optimizer", node_prompt_optimizer)
     workflow.add_node("approval_gate", node_approval_gate)
     workflow.add_node("task_router", node_task_router)
@@ -1253,11 +1405,20 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
     workflow.add_node("repair_agent", node_repair_agent)
     workflow.add_node("consolidator", node_consolidator)
 
-    # Linear planning spine
+    # Linear planning spine with bounded fidelity revision loop
     workflow.set_entry_point("spec_analyzer")
     workflow.add_edge("spec_analyzer", "rag_retriever")
     workflow.add_edge("rag_retriever", "architect")
-    workflow.add_edge("architect", "prompt_optimizer")
+    workflow.add_edge("architect", "spec_validator")
+    workflow.add_conditional_edges(
+        "spec_validator",
+        route_after_spec_validator,
+        {
+            "prompt_optimizer": "prompt_optimizer",
+            "architect": "architect",
+            "consolidator": "consolidator"
+        }
+    )
     workflow.add_edge("prompt_optimizer", "approval_gate")
     workflow.add_edge("approval_gate", "task_router")
 

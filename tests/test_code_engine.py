@@ -284,3 +284,66 @@ def test_repository_mapper_and_selector(temp_worktree):
     relevant = selector.select_relevant_files("Add two integer numbers using math addition")
     assert len(relevant) > 0
     assert relevant[0]["file"] == "src/math_utils.py"
+
+
+# ============================================================================
+# 11. Remediation Sprint: File Permissions & Package Shadowing Guards
+# ============================================================================
+def test_patch_engine_file_and_directory_permissions(temp_worktree):
+    """Verifies that created and modified files have 0o644 mode and directories have 0o755."""
+    import stat
+
+    engine = PatchEngine(temp_worktree)
+    manifest = engine.prepare_manifest(
+        changes=[
+            {
+                "file_path": "subdir/module.py",
+                "operation": "CREATE",
+                "proposed_content": "def test_func(): return True\n"
+            },
+            {
+                "file_path": "src/config.py",
+                "operation": "MODIFY",
+                "proposed_content": "TIMEOUT = 500\n"
+            }
+        ],
+        task_id="test-perms-01"
+    )
+    engine.apply_manifest(manifest)
+
+    created_file = temp_worktree / "subdir" / "module.py"
+    created_dir = temp_worktree / "subdir"
+    modified_file = temp_worktree / "src" / "config.py"
+
+    assert created_file.exists()
+    assert modified_file.exists()
+
+    # Check file permissions include read permissions for all (0o644)
+    file_mode = stat.S_IMODE(created_file.stat().st_mode)
+    assert file_mode & stat.S_IROTH, "Created file must be readable by others (UID 10001)"
+    assert file_mode & stat.S_IRGRP, "Created file must be readable by group"
+
+    mod_mode = stat.S_IMODE(modified_file.stat().st_mode)
+    assert mod_mode & stat.S_IROTH, "Modified file must be readable by others"
+
+    # Check directory permissions include execute/traverse permissions (0o755)
+    dir_mode = stat.S_IMODE(created_dir.stat().st_mode)
+    assert dir_mode & stat.S_IXOTH, "Directory must be traversable by others"
+
+
+def test_patch_engine_rejects_shadowed_third_party_packages(temp_worktree):
+    """Verifies that attempting to create fake/shadow packages (litellm, langgraph, tree_sitter) is strictly rejected."""
+    engine = PatchEngine(temp_worktree)
+
+    for disallowed_path in ["litellm.py", "langgraph/core.py", "tree_sitter_language_pack/__init__.py"]:
+        with pytest.raises(ValidationError) as exc_info:
+            engine.prepare_manifest(
+                changes=[{
+                    "file_path": disallowed_path,
+                    "operation": "CREATE",
+                    "proposed_content": "# fake stub\n"
+                }],
+                task_id="test-shadow-reject"
+            )
+        assert "shadowing third-party package" in str(exc_info.value)
+

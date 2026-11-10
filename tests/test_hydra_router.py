@@ -11,16 +11,27 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from hydra_router import (
     AllModelsFailedError,
+    AuthenticationError,
+    ConfigurationError,
+    ContextLengthExceededError,
     HydraRouter,
+    MalformedResponseError,
+    ModelCallMetrics,
     ModelRegistry,
     ModelRole,
     ModelSpec,
     OutputValidator,
+    ProviderErrorKind,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
+    RateLimitError,
     RoleConfig,
     RoleNotFoundError,
     RouterTelemetry,
     StructuredOutputValidationError,
     get_router,
+    normalize_provider_error,
+    redact_credentials,
 )
 
 # ============================================================================
@@ -300,3 +311,227 @@ def test_singleton_get_router():
     r2 = get_router()
     assert r1 is r2
     assert isinstance(r1, HydraRouter)
+
+
+# ============================================================================
+# 4. Multi-Provider Preparedness & Robustness Tests
+# ============================================================================
+
+def test_logical_roles_and_legacy_compatibility():
+    """Verifies that architect, coder, repairer, reviewer are distinct logical roles,
+    and that legacy 'planner' maps seamlessly without breaking backward compatibility.
+    """
+    assert ModelRole.ARCHITECT.value == "architect"
+    assert ModelRole.CODER.value == "coder"
+    assert ModelRole.REPAIRER.value == "repairer"
+    assert ModelRole.REVIEWER.value == "reviewer"
+
+    # Alias / backward compatibility check
+    assert ModelRole.PLANNER is ModelRole.ARCHITECT
+    assert ModelRole("planner") == ModelRole.ARCHITECT
+    assert ModelRole.normalize("planner") == ModelRole.ARCHITECT
+    assert ModelRole.normalize("architect") == ModelRole.ARCHITECT
+
+    reg = ModelRegistry()
+    for role in (ModelRole.ARCHITECT, ModelRole.CODER, ModelRole.REPAIRER, ModelRole.REVIEWER):
+        cfg = reg.get_role_config(role)
+        assert cfg.role == role
+        assert len(cfg.models) >= 2
+
+
+def test_env_var_overrides_comprehensive(monkeypatch):
+    """Verifies environment variable overrides for model chains, temperatures, and token limits."""
+    reg = ModelRegistry()
+
+    # Override architect
+    monkeypatch.setenv("HYDRAMEDA_ARCHITECT_MODEL", "custom/arch-primary,custom/arch-secondary")
+    arch_models = reg.get_active_models(ModelRole.ARCHITECT)
+    assert [m.model for m in arch_models] == ["custom/arch-primary", "custom/arch-secondary"]
+
+    # Legacy planner env var works if architect var not set
+    monkeypatch.delenv("HYDRAMEDA_ARCHITECT_MODEL")
+    monkeypatch.setenv("HYDRAMEDA_PLANNER_MODEL", "legacy/planner-1")
+    planner_models = reg.get_active_models(ModelRole.ARCHITECT)
+    assert [m.model for m in planner_models] == ["legacy/planner-1"]
+
+    # Override coder temperature and max tokens
+    monkeypatch.setenv("HYDRAMEDA_CODER_TEMPERATURE", "0.42")
+    monkeypatch.setenv("HYDRAMEDA_CODER_MAX_TOKENS", "16384")
+    coder_cfg = reg.get_role_config(ModelRole.CODER)
+    assert coder_cfg.default_temperature == pytest.approx(0.42)
+    assert coder_cfg.default_max_tokens == 16384
+
+
+def test_missing_provider_configuration_strict(monkeypatch, tmp_path):
+    """Verifies ConfigurationError is raised on missing keys or empty model configs when strict=True."""
+    # Empty override string should raise ConfigurationError
+    reg = ModelRegistry()
+    monkeypatch.setenv("HYDRAMEDA_CODER_MODEL", "   ")
+    with pytest.raises(ConfigurationError) as exc_info:
+        reg.get_active_models(ModelRole.CODER)
+    assert "is set but empty" in str(exc_info.value)
+
+    monkeypatch.delenv("HYDRAMEDA_CODER_MODEL")
+    # In strict mode without API keys in environment, ConfigurationError is raised
+    # Clear all possible provider API keys
+    for k in ("GROQ_API_KEY", "CEREBRAS_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    strict_reg = ModelRegistry(root_dir=tmp_path, strict=True)
+    with pytest.raises(ConfigurationError) as exc_strict:
+        strict_reg.get_active_models(ModelRole.CODER)
+    assert "Missing provider configuration for role 'coder'" in str(exc_strict.value)
+
+
+def test_provider_independent_error_normalization():
+    """Verifies deterministic classification of provider errors into 6 canonical categories."""
+    m = "test-model"
+    p = "test-provider"
+
+    # 1. Authentication Failure
+    auth_err = normalize_provider_error(RuntimeError("Invalid API Key: 401 Unauthorized"), model=m, provider=p)
+    assert isinstance(auth_err, AuthenticationError)
+    assert auth_err.error_kind == ProviderErrorKind.AUTHENTICATION_FAILURE
+
+    # 2. Rate Limit
+    rate_err = normalize_provider_error(RuntimeError("Rate limit reached. 429 Too Many Requests"), model=m, provider=p)
+    assert isinstance(rate_err, RateLimitError)
+    assert rate_err.error_kind == ProviderErrorKind.RATE_LIMIT
+
+    # 3. Timeout
+    timeout_err = normalize_provider_error(TimeoutError("Read operation timed out after 30s"), model=m, provider=p)
+    assert isinstance(timeout_err, ProviderTimeoutError)
+    assert timeout_err.error_kind == ProviderErrorKind.TIMEOUT
+
+    # 4. Context Length Exceeded
+    ctx_err = normalize_provider_error(RuntimeError("maximum context length is 8192 tokens. Please reduce prompt"), model=m, provider=p)
+    assert isinstance(ctx_err, ContextLengthExceededError)
+    assert ctx_err.error_kind == ProviderErrorKind.CONTEXT_LENGTH_EXCEEDED
+
+    # 5. Provider Unavailable
+    unavail_err = normalize_provider_error(RuntimeError("503 Service Unavailable: upstream server down"), model=m, provider=p)
+    assert isinstance(unavail_err, ProviderUnavailableError)
+    assert unavail_err.error_kind == ProviderErrorKind.PROVIDER_UNAVAILABLE
+
+    # 6. Malformed Response
+    malformed_err = normalize_provider_error(ValueError("Failed to decode JSON from provider payload"), model=m, provider=p)
+    assert isinstance(malformed_err, MalformedResponseError)
+    assert malformed_err.error_kind == ProviderErrorKind.MALFORMED_RESPONSE
+
+    # Idempotent normalization
+    assert normalize_provider_error(auth_err) is auth_err
+
+
+def test_secret_redaction():
+    """Verifies that API keys and sensitive tokens are strictly redacted from logs, errors, and telemetry."""
+    dirty_text = (
+        "Failed connection with sk-proj-1234567890abcdef12345678 and gsk_abcdef1234567890abcdef1234. "
+        "Also csk-cerebras987654321012345678 and AIzaSyDfakegooglekey987654321. "
+        "Bearer secret_token_xyz_12345678."
+    )
+    clean_text = redact_credentials(dirty_text)
+    assert "sk-proj" not in clean_text
+    assert "gsk_" not in clean_text
+    assert "csk-" not in clean_text
+    assert "AIzaSy" not in clean_text
+    assert "secret_token" not in clean_text
+    assert "[REDACTED_API_KEY]" in clean_text
+    assert "[REDACTED_BEARER_TOKEN]" in clean_text
+
+    # Verify AllModelsFailedError redacts attempts
+    attempts = [
+        {"model": "m1", "provider": "p1", "error": "Auth failed for sk-1234567890abcdef12345678"},
+        {"model": "m2", "provider": "p2", "error": "Bearer token_secret_12345678 expired"},
+    ]
+    all_failed = AllModelsFailedError(role="coder", attempts=attempts)
+    assert "sk-12345" not in str(all_failed)
+    assert "token_secret" not in str(all_failed)
+    for att in all_failed.attempts:
+        assert "sk-12345" not in att["error"]
+
+    # Verify Telemetry redacts error_message and fallback reason
+    telemetry = RouterTelemetry()
+    metrics = ModelCallMetrics(
+        role="coder",
+        model="m1",
+        provider="p1",
+        success=False,
+        error_message="Call failed with key sk-secret1234567890123456"
+    )
+    telemetry.record_call(metrics)
+    assert "sk-secret" not in metrics.error_message
+    assert "[REDACTED_API_KEY]" in metrics.error_message
+
+    telemetry.record_fallback("coder", "m1", "m2", "Error with gsk_9876543210abcdef123456")
+
+
+def test_fallback_on_empty_and_malformed_response(monkeypatch):
+    """Verifies that an empty completion or malformed response fails over to the next candidate model."""
+    import litellm
+
+    telemetry = RouterTelemetry()
+    reg = ModelRegistry()
+    m1 = ModelSpec(model="prov-a/empty-output", provider="prov-a")
+    m2 = ModelSpec(model="prov-b/valid-output", provider="prov-b")
+    reg.register_role(RoleConfig(role=ModelRole.CODER, models=[m1, m2]))
+
+    router = HydraRouter(registry=reg, telemetry=telemetry)
+
+    def mock_litellm_completion(**kwargs):
+        model = kwargs.get("model")
+        if model == "prov-a/empty-output":
+            # Returns empty content
+            class EmptyChoice:
+                message = type("Msg", (), {"content": "   \n\t  "})()
+            return type("MockResponse", (), {"choices": [EmptyChoice()], "usage": None})()
+        # prov-b succeeds
+        class ValidChoice:
+            message = type("Msg", (), {"content": "<file name=\"solution.py\">\ndef solve(): pass\n</file>"})()
+        return type("MockResponse", (), {"choices": [ValidChoice()], "usage": None})()
+
+    monkeypatch.setattr(litellm, "completion", mock_litellm_completion)
+
+    resp = router.complete(role=ModelRole.CODER, prompt="Write solution")
+    assert resp.model_used == "prov-b/valid-output"
+    assert "solution.py" in resp.content
+
+    summary = telemetry.get_summary()
+    assert summary["failed_calls"] == 1
+    assert summary["successful_calls"] == 1
+    assert summary["fallback_events"] == 1
+
+
+def test_fallback_on_validation_failure(monkeypatch):
+    """Verifies that when structured output validation fails, router fails over to next candidate model."""
+    import litellm
+
+    telemetry = RouterTelemetry()
+    reg = ModelRegistry()
+    m1 = ModelSpec(model="prov-a/bad-json", provider="prov-a")
+    m2 = ModelSpec(model="prov-b/good-json", provider="prov-b")
+    reg.register_role(RoleConfig(role=ModelRole.VERIFICATION_ANALYZER, models=[m1, m2]))
+
+    router = HydraRouter(registry=reg, telemetry=telemetry)
+
+    def mock_litellm_completion(**kwargs):
+        model = kwargs.get("model")
+        if model == "prov-a/bad-json":
+            # Missing required fields for SampleDiagnosis
+            class BadChoice:
+                message = type("Msg", (), {"content": '{"category": "SYNTAX_ERROR"}'})()
+            return type("MockResponse", (), {"choices": [BadChoice()], "usage": None})()
+        # prov-b provides valid JSON
+        class GoodChoice:
+            message = type("Msg", (), {"content": '{"category": "SYNTAX_ERROR", "confidence": 0.98, "fix_suggested": "add return"}'})()
+        return type("MockResponse", (), {"choices": [GoodChoice()], "usage": None})()
+
+    monkeypatch.setattr(litellm, "completion", mock_litellm_completion)
+
+    resp = router.complete(
+        role=ModelRole.VERIFICATION_ANALYZER,
+        prompt="Analyze error",
+        validator=OutputValidator.validate_pydantic(SampleDiagnosis)
+    )
+    assert resp.model_used == "prov-b/good-json"
+    assert isinstance(resp.parsed, SampleDiagnosis)
+    assert resp.parsed.confidence == 0.98

@@ -44,6 +44,8 @@ from code_engine import (
     PatchEngine,
     SafeConsolidator,
 )
+from code_engine.patch_engine import PatchApplicationError
+from code_engine.patch_validator import ValidationError
 from langgraph_engine import graph
 from langgraph_engine.preprocessor import create_isolated_worktree, validate_task_id
 from scripts.prune_worktrees import prune_worktrees
@@ -377,7 +379,6 @@ def test_atomic_patch_temporary_write_failure(tmp_path):
     )
 
     patch_engine = PatchEngine(target_worktree=tmp_path)
-    from code_engine.patch_engine import PatchApplicationError
 
     # Inject exception during temp write
     with (
@@ -410,7 +411,7 @@ def test_multi_file_patch_third_fails_triggers_rollback(tmp_path):
 
     patch_engine = PatchEngine(target_worktree=tmp_path)
 
-    with pytest.raises(PatchApplicationError):
+    with pytest.raises((PatchApplicationError, ValidationError)):
         patch_engine.apply_manifest(manifest)
 
     # files 1 and 2 must retain initial content

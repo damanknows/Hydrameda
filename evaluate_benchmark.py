@@ -47,8 +47,8 @@ def get_environment_info(repo_path: Path) -> dict:
     try:
         res = subprocess.run(["git", "-C", str(repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
         git_commit = res.stdout.strip() or "unknown"
-    except Exception:
-        pass
+    except (subprocess.SubprocessError, OSError):
+        git_commit = "unknown"
 
     return {
         "python_version": sys.version.split()[0],
@@ -156,7 +156,7 @@ def write_reports(
             ts = int(time.time())
             archive_file = archive_dir / f"benchmark_results_{ts}.json"
             shutil.copy2(results_path, archive_file)
-        except Exception as arch_err:
+        except OSError as arch_err:
             print(f"⚠️ Warning: Could not archive previous benchmark results: {arch_err}")
 
     # Write JSON results
@@ -213,7 +213,7 @@ def write_reports(
     try:
         report_md.parent.mkdir(parents=True, exist_ok=True)
         report_md.write_text("\n".join(md) + "\n", encoding="utf-8")
-    except Exception as md_err:
+    except OSError as md_err:
         print(f"⚠️ Warning: Could not write Obsidian markdown report: {md_err}")
 
     return summary
@@ -259,8 +259,8 @@ def main():
             existing_results = [t for t in prev.get("tasks", []) if t.get("passed")]
             completed_ids = {t["task_id"] for t in existing_results}
             print(f"🔄 Resuming: keeping {len(completed_ids)} previously passed tasks.")
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as resume_err:
+            print(f"⚠️ Warning: Could not resume from previous benchmark results: {resume_err}")
 
     results = list(existing_results)
     print("=" * 76)
@@ -303,7 +303,7 @@ def main():
             proc.wait()
             if proc.returncode != 0:
                 is_execution_failure = True
-        except Exception as exec_err:
+        except (subprocess.SubprocessError, OSError) as exec_err:
             is_execution_failure = True
             captured.append(f"Execution exception: {exec_err}\n")
 

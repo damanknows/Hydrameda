@@ -1,7 +1,10 @@
 """Secure isolated sandbox execution runner."""
 import json
+import logging
 import subprocess
 import time
+
+logger = logging.getLogger(__name__)
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -135,7 +138,7 @@ class SandboxRunner:
                     duration_ms=duration_ms,
                     diagnostic=diag
                 )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - Host fallback runner catches arbitrary execution exceptions
                 duration_ms = (time.perf_counter() - start_t) * 1000.0
                 return CheckResult(
                     name=name_str,
@@ -180,7 +183,7 @@ class SandboxRunner:
         ])
 
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
             duration_ms = (time.perf_counter() - start_t) * 1000.0
             status = CheckStatus.PASSED if proc.returncode == 0 else CheckStatus.FAILED
 
@@ -204,12 +207,12 @@ class SandboxRunner:
             duration_ms = (time.perf_counter() - start_t) * 1000.0
             try:
                 subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError) as exc:
+                logger.debug("docker kill failed: %s", exc)
             try:
                 subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError) as exc:
+                logger.debug("docker rm failed: %s", exc)
             return CheckResult(
                 name=name_str,
                 status=CheckStatus.FAILED,
@@ -218,17 +221,17 @@ class SandboxRunner:
                 duration_ms=duration_ms,
                 diagnostic=f"Sandbox execution timed out ({timeout}s limit exceeded)"
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - Sandbox runner catches arbitrary execution exceptions
             # Enforce container cleanup on unexpected exceptions as well
             duration_ms = (time.perf_counter() - start_t) * 1000.0
             try:
                 subprocess.run(["docker", "kill", container_name], capture_output=True, check=False)
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError) as exc:
+                logger.debug("docker kill failed: %s", exc)
             try:
                 subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, check=False)
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError) as exc:
+                logger.debug("docker rm failed: %s", exc)
             return CheckResult(
                 name=name_str,
                 status=CheckStatus.FAILED,
@@ -250,13 +253,13 @@ class SandboxRunner:
         try:
             info_proc = subprocess.run(
                 ["docker", "info", "--format", "{{json .SecurityOptions}}"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5, check=False
             )
             if info_proc.returncode == 0 and info_proc.stdout.strip():
                 daemon_security = json.loads(info_proc.stdout.strip())
                 is_rootless_daemon = any("rootless" in s.lower() for s in daemon_security)
-        except Exception:
-            pass
+        except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as exc:
+            logger.debug("docker info security probe failed: %s", exc)
 
         return {
             "container_user": self.config.user,

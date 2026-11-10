@@ -13,7 +13,15 @@ import litellm
 litellm.telemetry = False
 litellm.drop_params = True
 
-from hydra_router.exceptions import AllModelsFailedError
+from hydra_router.exceptions import (
+    AllModelsFailedError,
+    MalformedResponseError,
+    ModelProviderError,
+    ProviderErrorKind,
+    StructuredOutputValidationError,
+    normalize_provider_error,
+    redact_credentials,
+)
 from hydra_router.registry import ModelRegistry, ModelRole
 from hydra_router.telemetry import ModelCallMetrics, RouterTelemetry
 
@@ -138,6 +146,12 @@ class HydraRouter:
                 latency_ms = (time.perf_counter() - start_time) * 1000.0
 
                 content = resp.choices[0].message.content or ""
+                if not content.strip():
+                    raise MalformedResponseError(
+                        model=spec.model,
+                        provider=spec.provider,
+                        message="Provider returned empty or whitespace-only completion content"
+                    )
 
                 # Token usage tracking
                 usage = getattr(resp, "usage", None)
@@ -173,10 +187,21 @@ class HydraRouter:
 
             except Exception as e:  # noqa: BLE001 - Router fallback loop catches arbitrary provider SDK and HTTP exceptions
                 latency_ms = (time.perf_counter() - start_time) * 1000.0
-                err_str = str(e)
-                err_type = type(e).__name__
-                is_rate_limit = "429" in err_str or "rate_limit" in err_str.lower()
-                is_timeout = "timeout" in err_str.lower() or isinstance(e, TimeoutError)
+                norm_err: ModelProviderError
+                if isinstance(e, StructuredOutputValidationError):
+                    norm_err = MalformedResponseError(
+                        model=spec.model,
+                        provider=spec.provider,
+                        message=f"Structured output validation failed: {e}",
+                    )
+                else:
+                    norm_err = normalize_provider_error(e, model=spec.model, provider=spec.provider)
+
+                err_str = redact_credentials(str(norm_err))
+                err_type = norm_err.__class__.__name__
+                error_kind = norm_err.error_kind.value
+                is_rate_limit = norm_err.error_kind == ProviderErrorKind.RATE_LIMIT
+                is_timeout = norm_err.error_kind == ProviderErrorKind.TIMEOUT
 
                 metrics = ModelCallMetrics(
                     role=norm_role.value,
@@ -193,6 +218,7 @@ class HydraRouter:
                     "provider": spec.provider,
                     "error": err_str,
                     "error_type": err_type,
+                    "error_kind": error_kind,
                     "is_rate_limit": is_rate_limit,
                     "is_timeout": is_timeout
                 })
@@ -204,7 +230,7 @@ class HydraRouter:
                         role=norm_role.value,
                         from_model=spec.model,
                         to_model=next_spec.model,
-                        reason=f"{err_type}: {err_str[:120]}"
+                        reason=redact_credentials(f"{err_type}: {err_str[:120]}")
                     )
                     # Brief pause if rate-limited
                     if is_rate_limit:

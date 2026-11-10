@@ -202,7 +202,7 @@ def create_isolated_worktree(repo_path: str, task_id: str) -> str:
     subprocess.run(["git", "-C", str(repo), "worktree", "prune"], check=False, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "branch", "-D", branch_name], check=False, capture_output=True)
     try:
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch_name, str(worktree_target)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-B", branch_name, str(worktree_target)], check=True, capture_output=True)
     except subprocess.CalledProcessError as wt_err:
         err_msg = wt_err.stderr.decode("utf-8", errors="ignore") if wt_err.stderr else str(wt_err)
         # If git worktree add cannot write to parent .git (e.g. read-only container/sandbox), fall back to isolated local clone

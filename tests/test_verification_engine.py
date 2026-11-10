@@ -244,3 +244,93 @@ def test_sandbox_timeout_handling(tmp_path, monkeypatch):
     assert res.status == CheckStatus.FAILED
     assert res.exit_code == 124
     assert "timed out" in res.diagnostic
+
+
+# ============================================================================
+# 4. Critical Integration Remediation Sprint Tests
+# ============================================================================
+
+def test_import_resolution_target_files_scoping(tmp_path):
+    """Scoped verification: target_files isolates verification from unrelated files in worktree."""
+    # Target files for the current task
+    (tmp_path / "module.py").write_text("def hmac_sign(): return 'valid'\n")
+    (tmp_path / "test_module.py").write_text("from module import hmac_sign\ndef test(): assert hmac_sign() == 'valid'\n")
+
+    # Unrelated legacy file with broken imports in the worktree
+    (tmp_path / "unrelated_broken.py").write_text("import non_existent_pkg_12345\nfrom nowhere import nothing\n")
+
+    # Scoped check with target_files should PASS because unrelated_broken.py is out of scope
+    res_scoped = run_import_resolution_check(tmp_path, target_files=["module.py", "test_module.py"])
+    assert res_scoped.status == CheckStatus.PASSED
+    assert res_scoped.exit_code == 0
+
+    # Without target_files, the entire directory is checked, which correctly catches the broken import
+    res_unscoped = run_import_resolution_check(tmp_path)
+    assert res_unscoped.status == CheckStatus.FAILED
+    assert "non_existent_pkg_12345" in res_unscoped.diagnostic
+
+
+def test_import_resolution_package_indexing_and_submodules(tmp_path):
+    """Package indexing: __init__.py registers package dotted path and exports submodules/symbols."""
+    pkg_dir = tmp_path / "auth_pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("from .signer import TokenSigner\n__all__ = ['TokenSigner']\n")
+    (pkg_dir / "signer.py").write_text("class TokenSigner:\n    def sign(self): return 'token'\n")
+
+    # Consumer importing from the package
+    (tmp_path / "test_auth.py").write_text("from auth_pkg import TokenSigner\ndef test(): pass\n")
+
+    res = run_import_resolution_check(tmp_path, target_files=["test_auth.py"])
+    assert res.status == CheckStatus.PASSED
+    assert res.exit_code == 0
+
+
+def test_import_resolution_relative_imports(tmp_path):
+    """Verifies that relative imports within package hierarchy resolve correctly."""
+    pkg_dir = tmp_path / "crypto_lib"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("")
+    (pkg_dir / "keys.py").write_text("def load_key(): return b'secret'\n")
+    (pkg_dir / "verifier.py").write_text("from .keys import load_key\ndef verify(): return load_key() == b'secret'\n")
+
+    res = run_import_resolution_check(tmp_path, target_files=["crypto_lib/verifier.py"])
+    assert res.status == CheckStatus.PASSED
+    assert res.exit_code == 0
+
+
+def test_ignored_directories_excluded_from_verification(tmp_path):
+    """Verifies that ignored directories (exported_modules, .venv, worktrees) are excluded from scanning."""
+    from verification_engine.static_checks import get_worktree_py_files
+
+    # Valid task file
+    (tmp_path / "main.py").write_text("print('hello')\n")
+
+    # Files inside ignored directories
+    exp_dir = tmp_path / "exported_modules"
+    exp_dir.mkdir()
+    (exp_dir / "test_jwt_validator.py").write_text("import broken_mod\n")
+
+    venv_dir = tmp_path / ".venv" / "lib"
+    venv_dir.mkdir(parents=True)
+    (venv_dir / "site.py").write_text("import another_broken\n")
+
+    discovered = get_worktree_py_files(tmp_path)
+    discovered_names = [f.name for f in discovered]
+
+    assert "main.py" in discovered_names
+    assert "test_jwt_validator.py" not in discovered_names
+    assert "site.py" not in discovered_names
+
+
+def test_configured_dependencies_discovery(tmp_path):
+    """Verifies dynamic dependency discovery from requirements.txt and environment."""
+    from verification_engine.static_checks import get_configured_dependencies
+
+    (tmp_path / "requirements.txt").write_text("fastapi>=0.100.0\npydantic>=2.0\npytest-mock\n")
+    deps = get_configured_dependencies(tmp_path)
+
+    assert "fastapi" in deps
+    assert "pydantic" in deps
+    assert "pytest_mock" in deps
+    assert "jwt" in deps  # From baseline ALLOWED_PACKAGES
+

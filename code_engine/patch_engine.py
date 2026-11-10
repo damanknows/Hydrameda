@@ -19,7 +19,7 @@ from typing import Any
 
 from .change_manifest import ChangeManifest, FileChange, FileOperation
 from .diff_generator import DiffGenerator
-from .patch_validator import PatchValidator, ValidationError
+from .patch_validator import PROTECTED_SHADOW_PACKAGES, PatchValidator, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,15 @@ class PatchEngine:
             op = FileOperation(c_data["operation"])
             proposed_content = c_data.get("proposed_content")
             authorized = c_data.get("authorized", False)
+
+            if op == FileOperation.CREATE:
+                parts = Path(rel_path).parts
+                top_part = parts[0].replace(".py", "") if parts else ""
+                stem = Path(rel_path).stem
+                if top_part in PROTECTED_SHADOW_PACKAGES or (len(parts) == 1 and stem in PROTECTED_SHADOW_PACKAGES):
+                    raise ValidationError(
+                        f"Creating fake or shadowing third-party package/module '{rel_path}' is strictly prohibited."
+                    )
 
             orig_content = None
             # STEP 2: Re-verify boundary and symlinks to prevent TOCTOU escapes before reading
@@ -100,10 +109,15 @@ class PatchEngine:
                 # Step 3: Execute file operation with atomic write and permission preservation
                 if change.operation == FileOperation.CREATE:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        os.chmod(target_path.parent, 0o755)
+                    except OSError:
+                        pass
                     tmp_fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".hydra_atomic_tmp_")
                     try:
                         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                             f.write(change.proposed_content or "")
+                        os.chmod(tmp_file, 0o644)
                         os.replace(tmp_file, target_path)
                     except Exception:
                         if Path(tmp_file).exists():
@@ -118,6 +132,9 @@ class PatchEngine:
                             f.write(change.proposed_content or "")
                         if orig_stat is not None:
                             shutil.copystat(target_path, tmp_file)
+                            os.chmod(tmp_file, orig_stat.st_mode | 0o644)
+                        else:
+                            os.chmod(tmp_file, 0o644)
                         os.replace(tmp_file, target_path)
                     except Exception:
                         if Path(tmp_file).exists():
