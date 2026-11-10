@@ -32,15 +32,56 @@ class ExperienceExtractor:
         error_msg = execution_state.get("error", "")
         prompt_lower = task_prompt.lower()
 
-        # 1. Lesson: Semantic Constraint Contradiction (e.g. JWT introduced when HMAC requested)
+        # 1. Lesson: Explicitly prohibited functionality must be checked before approval
         spec_violations = execution_state.get("specification_constraint_violations", [])
-        if any("jwt" in v.lower() for v in spec_violations) or (
+        prohibitions = execution_state.get("task_requirements", {}).get("prohibitions", [])
+        if spec_violations or any("jwt" in p.lower() for p in prohibitions) or (
             "not implement jwt" in prompt_lower and "validate_jwt" in execution_state.get("spec_md", "").lower()
         ):
             payload: dict[str, Any] = {
-                "lesson_type": "semantic_constraint_violation",
-                "prohibited": "JWT",
-                "requested": "HMAC"
+                "lesson_type": "prohibition_audit_before_approval",
+                "violations": spec_violations,
+                "task_prompt": task_prompt
+            }
+            prov = ProvenanceTracker.create_provenance(
+                source_task_id=task_id,
+                outcome=ExecutionOutcome.SEMANTIC_VIOLATION if spec_violations else ExecutionOutcome.VERIFIED_SUCCESS,
+                content_payload=payload
+            )
+            candidate = KnowledgeRecord(
+                knowledge_id=f"LESSON-PROHIB-{task_id[:8]}",
+                category=KnowledgeCategory.LESSON,
+                title="Explicitly Prohibited Functionality Must Be Checked Before Approval (e.g. Prohibited JWT)",
+                description=(
+                    "Negative constraints and explicitly prohibited features must be deterministically checked "
+                    "and audited before presenting a proposed specification or changeset for human approval."
+                ),
+                procedure=[
+                    "Compile and isolate user-specified negative constraints into an immutable priority ledger and enforce strict prohibition checks before approval.",
+                    "Audit generated specifications against prohibitions using deterministic AST and keyword detection.",
+                    "Reject non-compliant specifications early before presentation to human review gates.",
+                    "Never rely on human approval alone to catch prohibited architectural contamination."
+                ],
+                provenance=prov,
+                evidence=f"Task {task_id} audited explicit prohibitions against user requirements: {spec_violations or 'verified strict negative constraints'}",
+                confidence=0.98,
+                applicability=["prohibitions", "negative_constraints", "governance", "approval_gate", "fidelity"],
+                reuse_policy=ReusePolicy.FAILURE_WARNING,
+            )
+            is_valid, _ = LearningPolicy.validate_candidate_lesson(candidate)
+            if is_valid:
+                lessons.append(candidate)
+
+        # 2. Lesson: A static-analysis pass cannot establish semantic prompt compliance
+        tech_status = execution_state.get("technical_verification_status", "")
+        sem_status = execution_state.get("semantic_compliance_status", "")
+        sem_report = execution_state.get("semantic_compliance_report", {})
+        err_cat = execution_state.get("error_analysis", {}).get("category", "")
+        if (tech_status == "PASSED" and sem_status in ("FAILED", "WARNING")) or err_cat == "SEMANTIC_COMPLIANCE_FAILURE" or sem_report.get("findings"):
+            payload = {
+                "lesson_type": "static_vs_semantic_compliance",
+                "technical_status": tech_status,
+                "semantic_status": sem_status,
             }
             prov = ProvenanceTracker.create_provenance(
                 source_task_id=task_id,
@@ -48,67 +89,30 @@ class ExperienceExtractor:
                 content_payload=payload
             )
             candidate = KnowledgeRecord(
-                knowledge_id=f"LESSON-SEMANTIC-{task_id[:8]}",
+                knowledge_id=f"LESSON-SEMANTIC-COMPLIANCE-{task_id[:8]}",
                 category=KnowledgeCategory.LESSON,
-                title="Negative Constraint Contamination: Do Not Introduce Prohibited Protocols (JWT)",
+                title="A Static-Analysis Pass Cannot Establish Semantic Prompt Compliance",
                 description=(
-                    "Architect agents can be primed by historical notes or training biases to introduce "
-                    "complex protocols (like JWT) when the user explicitly asked for non-JWT HMAC tokens."
+                    "Passing static analysis (Ruff, Mypy) and technical tests does not guarantee semantic compliance. "
+                    "Code may pass all technical checks while completely missing required features or implementing prohibited ones."
                 ),
                 procedure=[
-                    "Always check explicit prohibitions before reviewing background RAG notes.",
-                    "Disregard historical specs that recommend claims, exp, or JWT headers when negative constraints apply.",
-                    "Verify that specification functions strictly use basic payload signing (e.g. sign_token, verify_token).",
-                    "Do not allow semantic tests to be satisfied by renaming JWT functions."
+                    "Maintain separate technical verification and semantic task compliance verification layers.",
+                    "Inspect generated ASTs to ensure requested functions have substantive non-stub implementations.",
+                    "Verify test effectiveness to confirm test assertions actually exercise the requested code.",
+                    "Never treat a technical verification pass as an automatic indication of overall task success."
                 ],
                 provenance=prov,
-                evidence=f"Violations detected in task {task_id}: {'; '.join(spec_violations) if spec_violations else 'Contradiction observed in generated spec'}",
-                confidence=0.98,
-                applicability=["crypto", "jwt", "hmac", "constraints", "fidelity"],
+                evidence=f"Task {task_id} demonstrated technical verification pass ({tech_status}) with semantic compliance evaluation ({sem_status}): {sem_report.get('summary', 'semantic compliance findings')}",
+                confidence=0.97,
+                applicability=["verification", "semantic_compliance", "static_analysis", "ast", "invariants"],
                 reuse_policy=ReusePolicy.FAILURE_WARNING,
             )
             is_valid, _ = LearningPolicy.validate_candidate_lesson(candidate)
             if is_valid:
                 lessons.append(candidate)
 
-        # 2. Lesson: Fake Stub Packages to satisfy import checks
-        current_files = execution_state.get("current_files", {})
-        stub_files = [f for f in current_files if f in ("litellm.py", "langgraph.py", "tree_sitter_language_pack.py")]
-        if stub_files or "stub" in error_msg.lower():
-            payload = {
-                "lesson_type": "fake_stub_anti_pattern",
-                "files": stub_files
-            }
-            prov = ProvenanceTracker.create_provenance(
-                source_task_id=task_id,
-                outcome=ExecutionOutcome.VERIFICATION_FAILURE,
-                content_payload=payload
-            )
-            candidate = KnowledgeRecord(
-                knowledge_id=f"LESSON-STUB-{task_id[:8]}",
-                category=KnowledgeCategory.LESSON,
-                title="Mock Package Anti-Pattern: Never Create Stubs to Bypass Import Resolution",
-                description=(
-                    "Repair agents may attempt to pass verification checks by synthesizing fake wrapper "
-                    "files (e.g. litellm.py) inside the worktree instead of repairing the target task module."
-                ),
-                procedure=[
-                    "Inspect import errors to identify whether the missing dependency is internal or third-party.",
-                    "Never create mock top-level files matching framework or third-party library names.",
-                    "Configure verification environment to use standard library or configured dependencies only.",
-                    "Fail early with an environment error rather than hallucinating stub modules."
-                ],
-                provenance=prov,
-                evidence=f"Task {task_id} attempted or detected fake stub modules: {stub_files}",
-                confidence=0.96,
-                applicability=["dependencies", "imports", "verification", "sandbox"],
-                reuse_policy=ReusePolicy.FAILURE_WARNING,
-            )
-            is_valid, _ = LearningPolicy.validate_candidate_lesson(candidate)
-            if is_valid:
-                lessons.append(candidate)
-
-        # 3. Lesson: Rootless Container Restrictive Permission Failure
+        # 3. Lesson: Rootless container permissions need to be considered during generated-file creation
         stderr = execution_state.get("pytest_stderr", "")
         if "permission denied" in stderr.lower() or "read-only" in stderr.lower() or "permission denied" in error_msg.lower():
             payload = {
@@ -121,22 +125,61 @@ class ExperienceExtractor:
                 content_payload=payload
             )
             candidate = KnowledgeRecord(
-                knowledge_id=f"LESSON-PERM-{task_id[:8]}",
+                knowledge_id=f"LESSON-ROOTLESS-PERM-{task_id[:8]}",
                 category=KnowledgeCategory.LESSON,
-                title="Rootless Container File Permission Traps",
+                title="Rootless Container Permissions Need To Be Considered During Generated-File Creation",
                 description=(
-                    "Files created in worktrees with restrictive umask (e.g. 0700 or non-world-readable) "
-                    "will cause rootless Docker verification containers to fail with EACCES Permission Denied."
+                    "Files created in host worktrees with restrictive umask (e.g. 0700 or non-world-readable) "
+                    "cause rootless Docker verification containers to fail with EACCES Permission Denied errors."
                 ),
                 procedure=[
-                    "Ensure worktree files and directories grant read/execute permissions to container UID/GID.",
-                    "Avoid mounting sensitive host paths into verification containers.",
-                    "Verify file permissions prior to invoking Docker subprocess runners."
+                    "Ensure worktree files and directories grant read and execute permissions compatible with container users.",
+                    "Avoid mounting sensitive host paths into rootless verification sandboxes.",
+                    "Inspect and normalize file permission bits when creating new files and directories."
                 ],
                 provenance=prov,
-                evidence=f"Permission error observed in task {task_id}: {error_msg or stderr[:200]}",
-                confidence=0.92,
-                applicability=["docker", "permissions", "sandbox", "rootless"],
+                evidence=f"Permission diagnostic observed in task {task_id}: {error_msg or stderr[:200]}",
+                confidence=0.94,
+                applicability=["docker", "permissions", "sandbox", "rootless", "container"],
+                reuse_policy=ReusePolicy.FAILURE_WARNING,
+            )
+            is_valid, _ = LearningPolicy.validate_candidate_lesson(candidate)
+            if is_valid:
+                lessons.append(candidate)
+
+        # 4. Lesson: Import resolution should distinguish generated files from unrelated repository modules
+        current_files = execution_state.get("current_files", {})
+        stub_files = [f for f in current_files if f in ("litellm.py", "langgraph.py", "tree_sitter_language_pack.py", "pytest.py")]
+        diag = str(execution_state.get("error_analysis", {}))
+        if stub_files or "import" in error_msg.lower() or "import_resolution" in diag.lower() or "stub" in error_msg.lower():
+            payload = {
+                "lesson_type": "scoped_import_resolution",
+                "files": stub_files,
+                "error": error_msg
+            }
+            prov = ProvenanceTracker.create_provenance(
+                source_task_id=task_id,
+                outcome=ExecutionOutcome.VERIFICATION_FAILURE,
+                content_payload=payload
+            )
+            candidate = KnowledgeRecord(
+                knowledge_id=f"LESSON-IMPORT-RES-{task_id[:8]}",
+                category=KnowledgeCategory.LESSON,
+                title="Import Resolution Should Distinguish Generated Files From Unrelated Repository Modules (Avoid Mock Stubs)",
+                description=(
+                    "Import resolution must isolate task-generated files from unrelated pre-existing repository modules. "
+                    "Unscoped repository scans cause false-positive baseline failures and prompt repair agents to synthesize fake stubs."
+                ),
+                procedure=[
+                    "Scope import resolution strictly to files created or modified by the task.",
+                    "Do not scan unrelated repository modules during task-level import verification.",
+                    "Never synthesize fake third-party dependency packages (e.g. litellm.py) to satisfy import checks.",
+                    "Fail early with clear dependency guidance rather than generating mock stubs."
+                ],
+                provenance=prov,
+                evidence=f"Import resolution diagnostics in task {task_id}: {stub_files or error_msg or 'import isolation check'}",
+                confidence=0.96,
+                applicability=["imports", "dependencies", "isolation", "verification", "stubs"],
                 reuse_policy=ReusePolicy.FAILURE_WARNING,
             )
             is_valid, _ = LearningPolicy.validate_candidate_lesson(candidate)

@@ -110,6 +110,7 @@ try:
         ExperienceRetriever,
         KnowledgeRecord,
         KnowledgeStore,
+        LearningPolicy,
         RetrievedExperienceContext,
         SkillExtractor,
     )
@@ -122,6 +123,7 @@ except ImportError:
         ExperienceRetriever,
         KnowledgeRecord,
         KnowledgeStore,
+        LearningPolicy,
         RetrievedExperienceContext,
         SkillExtractor,
     )
@@ -352,6 +354,9 @@ class HydramedaState(TypedDict, total=False):
     consolidation_report: dict[str, Any]
     start_time: float
     end_time: float
+    extracted_skills: list[dict[str, Any]]
+    extracted_lessons: list[dict[str, Any]]
+    experience_extraction_status: str        # "COMPLETED" | "SKIPPED" | "FAILED"
 
 
 
@@ -372,8 +377,59 @@ def log_event(state: HydramedaState, node: str, level: str, message: str, metada
 
 
 # ============================================================================
-# 12 Node Definitions
+# Node Definitions
 # ============================================================================
+
+def node_intent_compiler(state: HydramedaState) -> HydramedaState:
+    """Node 0: Canonical Intent Compiler.
+
+    Compiles unstructured user prompts into an immutable StructuredIntent ledger,
+    extracting explicit prohibitions, required capabilities, deliverables, and scope boundaries.
+
+    Inputs:  user_prompt, task_id
+    Outputs: structured_intent, task_requirements, task_state
+    """
+    node = "intent_compiler"
+    state["task_state"] = TaskState.ANALYZING.value
+    if not state.get("start_time"):
+        state["start_time"] = time.time()
+
+    prompt = state.get("user_prompt", "").strip()
+    log_event(state, node, "INFO", f"Compiling canonical task intent for '{state.get('task_id')}'...")
+
+    try:
+        if not prompt:
+            raise ValueError("user_prompt cannot be empty")
+
+        intent = ConstraintCompiler.compile(prompt)
+        state["structured_intent"] = intent.to_dict()
+
+        prohibitions = [p.normalized_description for p in intent.get_prohibitions()]
+        capabilities = [c.normalized_description for c in intent.get_positive_requirements()]
+        reqs = TaskRequirements(
+            required_capabilities=capabilities,
+            prohibited_capabilities=prohibitions,
+            scope_boundaries=[s.normalized_description for s in intent.scope_boundaries],
+            technical_constraints=[t.normalized_description for t in intent.technical_requirements],
+            requested_deliverables=[d.normalized_description for d in intent.expected_deliverables],
+        )
+        state["task_requirements"] = reqs.to_dict()
+
+        log_event(
+            state,
+            node,
+            "SUCCESS",
+            f"Canonical intent compiled ({len(intent.explicit_prohibitions)} prohibitions, "
+            f"{len(intent.required_capabilities)} capabilities, {len(intent.scope_boundaries)} scope boundaries)"
+        )
+    except Exception as e:  # noqa: BLE001
+        log_event(state, node, "ERROR", f"Intent compiler failure: {e}")
+        state["error"] = str(e)
+        state["status"] = "ERROR"
+        state["task_state"] = TaskState.FAILED.value
+
+    return state
+
 
 def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
     """Node 1: Analyzes user prompt intent and extracts repository AST skeleton.
@@ -496,13 +552,19 @@ def node_rag_retriever(state: HydramedaState) -> HydramedaState:
         state["vault_context"] = vault_hits
         log_event(state, node, "SUCCESS", f"Retrieved Obsidian RAG context ({len(vault_hits)} chars)")
 
-        # Phase 2 & 3: Structured Experience & Skill Retrieval
+        # Structured Experience & Skill Retrieval
+        intent_obj: StructuredIntent | None = None
         if state.get("structured_intent"):
-            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            intent_obj = StructuredIntent.from_dict(state.get("structured_intent"))
+        elif state.get("user_prompt"):
+            intent_obj = ConstraintCompiler.compile(state["user_prompt"])
+            state["structured_intent"] = intent_obj.to_dict()
+
+        if intent_obj:
             analysis = state.get("task_analysis", {})
-            keywords = analysis.get("keywords", [])
+            keywords = analysis.get("keywords", []) or re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", query)
             retriever = ExperienceRetriever()
-            exp_ctx = retriever.retrieve(intent=intent, task_keywords=keywords)
+            exp_ctx = retriever.retrieve(intent=intent_obj, task_keywords=keywords)
             state["retrieved_skills"] = [s.to_dict() for s in exp_ctx.skills]
             state["retrieved_lessons"] = [l.to_dict() for l in exp_ctx.lessons]
             log_event(
@@ -748,15 +810,30 @@ def node_spec_validator(state: HydramedaState) -> HydramedaState:
 
 
 def route_after_spec_validator(state: HydramedaState) -> str:
-    """Conditional edge after spec_validator: routes to prompt_optimizer, architect retry, or consolidator halt."""
-    if state.get("specification_fidelity_status") == "PASSED":
+    """Conditional edge after specification auditor:
+    ├── PASSED → prompt_optimizer (→ approval_gate)
+    ├── REJECTED → architect retry (or consolidator safe failure if max retries reached)
+    ├── NEEDS_CLARIFICATION → approval_gate (user clarification)
+    └── INTERNAL_ERROR → consolidator (safe failure)
+    """
+    fidelity_status = state.get("specification_fidelity_status")
+    audit_outcome = state.get("specification_audit_outcome")
+
+    if fidelity_status == "PASSED" or audit_outcome == "PASSED":
         return "prompt_optimizer"
+    elif audit_outcome == "NEEDS_CLARIFICATION":
+        return "approval_gate"
+    elif fidelity_status == "FAILED" or audit_outcome == "REJECTED":
+        attempts = state.get("spec_validation_attempts", 0)
+        if attempts < 3:
+            return "architect"
+        state["status"] = "FAILED"
+        state["task_state"] = TaskState.FAILED.value
+        return "consolidator"
 
-    attempts = state.get("spec_validation_attempts", 0)
-    if attempts < 3:
-        return "architect"
-
-    # Max attempts reached: halt execution and route directly to consolidator (skip approval gate & code builder)
+    # INTERNAL_ERROR, invalid, or missing audit state -> safe failure
+    state["status"] = "FAILED"
+    state["task_state"] = TaskState.FAILED.value
     return "consolidator"
 
 
@@ -845,13 +922,45 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         state["task_state"] = TaskState.PLANNING.value
         return state
 
-    # Phase 5: Only a PASSED specification can enter human approval
-    if state.get("specification_fidelity_status") == "FAILED" or (
-        state.get("specification_audit_outcome") and state.get("specification_audit_outcome") != "PASSED"
-    ):
-        log_event(state, node, "ERROR", "Approval gate blocked: specification failed autonomous audit or constraint verification.")
+    # Phase 5 & 9: Only a PASSED specification can enter human approval
+    # Prevent accidental bypasses of the specification auditor
+    # The graph must fail closed if audit state is missing, invalid, or unsuccessful.
+    audit_outcome = state.get("specification_audit_outcome")
+    fidelity_status = state.get("specification_fidelity_status")
+
+    if audit_outcome == "NEEDS_CLARIFICATION":
+        log_event(state, node, "INFO", "Pausing for user clarification on ambiguous specification...")
+        state["task_state"] = TaskState.AWAITING_APPROVAL.value
+        resume_val = interrupt({
+            "action": "clarify_specification",
+            "task_id": state.get("task_id"),
+            "feedback": state.get("fidelity_feedback") or "Specification requires user clarification.",
+            "question": "Provide clarification for specification? [approved: True/False, comments: ...]"
+        })
+        if isinstance(resume_val, dict) and resume_val.get("approved") is True:
+            state["approval_status"] = "APPROVED"
+            state["task_state"] = TaskState.PLANNING.value
+            return state
+        state["approval_status"] = "REJECTED"
+        state["status"] = "FAILED"
+        state["task_state"] = TaskState.CANCELLED.value
+        state["route"] = "cancel"
+        return state
+
+    if fidelity_status == "FAILED" or (audit_outcome and audit_outcome not in ("PASSED", "NEEDS_CLARIFICATION")):
+        log_event(state, node, "ERROR", f"Approval gate blocked: specification audit status is '{fidelity_status}' (not PASSED). Failing closed.")
         state["approval_status"] = "REJECTED"
         state["specification_approval_status"] = "REJECTED"
+        state["status"] = "FAILED"
+        state["task_state"] = TaskState.CANCELLED.value
+        state["route"] = "cancel"
+        return state
+
+    if state.get("spec_md") and fidelity_status != "PASSED":
+        log_event(state, node, "ERROR", f"Approval gate blocked: specification audit status is '{fidelity_status}' (not PASSED). Failing closed.")
+        state["approval_status"] = "REJECTED"
+        state["specification_approval_status"] = "REJECTED"
+        state["status"] = "FAILED"
         state["task_state"] = TaskState.CANCELLED.value
         state["route"] = "cancel"
         return state
@@ -1662,7 +1771,24 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
     except Exception as obs_err:  # noqa: BLE001 - graceful fallback on vault sync failure
         log_event(state, node, "WARN", f"Obsidian report sync warning: {obs_err}")
 
-    # Phase 2: Autonomous Experience & Skill Extraction
+    return state
+
+
+def node_experience_extractor(state: HydramedaState) -> HydramedaState:
+    """Node 14: Dedicated experience and skill extraction after verification and consolidation.
+
+    Extracts reusable lessons and procedural skills from both successful and failed tasks.
+    Enforces LearningPolicy to separate learning from code reuse:
+    - Retains only generalizable engineering lessons.
+    - Rejects raw code dumps, entire implementation templates, and universal repair assumptions.
+    - Records concrete evidence and source task ID for every lesson.
+    - Persists approved records to the KnowledgeStore.
+
+    Inputs:  task_id, user_prompt, execution state
+    Outputs: extracted_skills, extracted_lessons, experience_extraction_status
+    """
+    node = "experience_extractor"
+    log_event(state, node, "INFO", "Extracting reusable lessons and procedural skills...")
     try:
         task_id = state.get("task_id", "unknown_task")
         user_prompt = state.get("user_prompt", "")
@@ -1676,20 +1802,38 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
             task_prompt=user_prompt,
             execution_state=dict(state)
         )
-        if extracted_skills or extracted_lessons:
+
+        valid_skills = []
+        for sk in extracted_skills:
+            is_valid, _ = LearningPolicy.validate_candidate_skill(sk)
+            if is_valid:
+                valid_skills.append(sk)
+
+        valid_lessons = []
+        for ls in extracted_lessons:
+            is_valid, _ = LearningPolicy.validate_candidate_lesson(ls)
+            if is_valid:
+                valid_lessons.append(ls)
+
+        if valid_skills or valid_lessons:
             kstore = KnowledgeStore()
-            for sk in extracted_skills:
+            for sk in valid_skills:
                 kstore.add_record(sk)
-            for ls in extracted_lessons:
+            for ls in valid_lessons:
                 kstore.add_record(ls)
             log_event(
                 state,
                 node,
                 "SUCCESS",
-                f"Knowledge Store updated: {len(extracted_skills)} skills, {len(extracted_lessons)} lessons extracted"
+                f"Knowledge Store updated: {len(valid_skills)} skills, {len(valid_lessons)} lessons extracted"
             )
-    except Exception as learn_err:  # noqa: BLE001 - learning extraction should not crash consolidation
+
+        state["extracted_skills"] = [s.to_dict() for s in valid_skills]
+        state["extracted_lessons"] = [l.to_dict() for l in valid_lessons]
+        state["experience_extraction_status"] = "COMPLETED"
+    except Exception as learn_err:  # noqa: BLE001 - learning extraction should not crash graph
         log_event(state, node, "WARN", f"Experience learning extraction warning: {learn_err}")
+        state["experience_extraction_status"] = "FAILED"
 
     return state
 
@@ -1738,12 +1882,13 @@ def route_after_verifier(state: HydramedaState) -> str:
 # ============================================================================
 
 def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None = None):
-    """Builds and compiles the 12-node cyclic neuro-symbolic LangGraph engine."""
+    """Builds and compiles the 15-node neuro-symbolic LangGraph engine."""
     workflow = StateGraph(HydramedaState)
 
     # Register nodes
-    workflow.add_node("spec_analyzer", node_spec_analyzer)
+    workflow.add_node("intent_compiler", node_intent_compiler)
     workflow.add_node("rag_retriever", node_rag_retriever)
+    workflow.add_node("spec_analyzer", node_spec_analyzer)
     workflow.add_node("architect", node_architect)
     workflow.add_node("spec_validator", node_spec_validator)
     workflow.add_node("prompt_optimizer", node_prompt_optimizer)
@@ -1755,11 +1900,13 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
     workflow.add_node("error_analyzer", node_error_analyzer)
     workflow.add_node("repair_agent", node_repair_agent)
     workflow.add_node("consolidator", node_consolidator)
+    workflow.add_node("experience_extractor", node_experience_extractor)
 
-    # Linear planning spine with bounded fidelity revision loop
-    workflow.set_entry_point("spec_analyzer")
-    workflow.add_edge("spec_analyzer", "rag_retriever")
-    workflow.add_edge("rag_retriever", "architect")
+    # Linear planning spine: Intent -> Experience Retrieval -> Repository Context -> Architect -> Auditor
+    workflow.set_entry_point("intent_compiler")
+    workflow.add_edge("intent_compiler", "rag_retriever")
+    workflow.add_edge("rag_retriever", "spec_analyzer")
+    workflow.add_edge("spec_analyzer", "architect")
     workflow.add_edge("architect", "spec_validator")
     workflow.add_conditional_edges(
         "spec_validator",
@@ -1767,6 +1914,7 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
         {
             "prompt_optimizer": "prompt_optimizer",
             "architect": "architect",
+            "approval_gate": "approval_gate",
             "consolidator": "consolidator"
         }
     )
@@ -1808,8 +1956,9 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
     workflow.add_edge("error_analyzer", "repair_agent")
     workflow.add_edge("repair_agent", "sandbox_verifier")
 
-    # Terminal edge
-    workflow.add_edge("consolidator", END)
+    # Post-verification consolidation & experience extraction
+    workflow.add_edge("consolidator", "experience_extractor")
+    workflow.add_edge("experience_extractor", END)
 
     # Default persistent SQLite checkpointer
     if checkpointer is None:

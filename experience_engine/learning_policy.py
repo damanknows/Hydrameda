@@ -110,6 +110,41 @@ class LearningPolicy:
         if len(candidate.description.strip()) < 15:
             return False, "Policy Violation: Lesson description is too brief to be generalizable."
 
+        # 4. Strictly reject prohibited bad memory record patterns:
+        desc_lower = candidate.description.lower()
+        title_lower = candidate.title.lower()
+        proc_text = " ".join(candidate.procedure).lower()
+        all_text = f"{title_lower} {desc_lower} {proc_text}"
+
+        # Bad record 1: Store entire generated implementation as a reusable template
+        if any(bad in all_text for bad in (
+            "reusable template for all",
+            "entire generated",
+            "entire implementation",
+            "store full implementation",
+            "template for all authentication",
+        )):
+            return False, "Policy Violation: Memory records cannot store entire implementations as universal templates."
+
+        # Bad record 2: Copy every file from a previous worktree into future context
+        if any(bad in all_text for bad in (
+            "copy every file",
+            "copy all files",
+            "copy worktree into future",
+            "copying every file from",
+            "inject entire worktree",
+        )):
+            return False, "Policy Violation: Memory records cannot recommend copying all files or entire worktrees into future context."
+
+        # Bad record 3: Treat one successful repair as universally valid
+        if any(bad in all_text for bad in (
+            "universally valid",
+            "apply to all tasks unconditionally",
+            "universal repair",
+            "treat one successful repair as universally valid",
+        )):
+            return False, "Policy Violation: Memory records cannot treat a single repair as universally valid."
+
         return True, "Candidate lesson validated successfully."
 
     @classmethod
