@@ -81,11 +81,18 @@ def test_approval_defaults_fail_closed():
     # Verify interrupt is triggered rather than auto-approving
     app = graph.build_hydrameda_graph(checkpointer=MemorySaver())
     config = {"configurable": {"thread_id": "test-default-gate"}}
-    app.invoke(unconfigured_state, config)
-    snapshot = app.get_state(config)
-    assert snapshot.next == ("approval_gate",)
-    assert len(snapshot.tasks[0].interrupts) == 1
-    assert snapshot.tasks[0].interrupts[0].value["action"] == "review_specification"
+    graph.set_llm_handler(lambda role, prompt: (
+        "# Spec: Test prompt\nDefine run_test() -> None.\nIncludes pytest tests.",
+        "mock-architect"
+    ))
+    try:
+        app.invoke(unconfigured_state, config)
+        snapshot = app.get_state(config)
+        assert snapshot.next == ("approval_gate",)
+        assert len(snapshot.tasks[0].interrupts) == 1
+        assert snapshot.tasks[0].interrupts[0].value["action"] == "review_specification"
+    finally:
+        graph.set_llm_handler(None)
 
 
 # ============================================================================

@@ -276,6 +276,161 @@ class GovernanceEngine:
         return "\n".join(lines)
 
     @classmethod
+    def format_specification_approval_display(
+        cls,
+        task_id: str,
+        user_prompt: str,
+        spec_md: str,
+        intent: Any = None,
+        audit_report: Any = None,
+        retrieved_skills: list[dict[str, Any]] | None = None,
+        retrieved_lessons: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Builds a rich markdown display for specification review in LangGraph approval interrupt."""
+        lines = [
+            f"# 🛡️ Hydrameda Specification Governance Review: Task `{task_id}`",
+            "",
+            "## 🎯 Original User Objective",
+            f"> {user_prompt}",
+            "",
+        ]
+
+        # Intent details
+        if intent and hasattr(intent, "primary_objective"):
+            lines.extend([
+                f"**Primary Objective:** {intent.primary_objective}",
+                "",
+                "## 📋 Required Features",
+            ])
+            pos_reqs = intent.get_positive_requirements()
+            if pos_reqs:
+                for r in pos_reqs:
+                    lines.append(f"- [REQUIRED] {r.normalized_description}")
+            else:
+                lines.append("- *(Inferred from prompt)*")
+
+            lines.extend([
+                "",
+                "## 🚫 Prohibited Features (Strict Invariants)",
+            ])
+            prohibitions = intent.get_prohibitions()
+            if prohibitions:
+                for p in prohibitions:
+                    lines.append(f"- [PROHIBITED] **{p.normalized_description.upper()}** (Source: \"{p.source_text}\")")
+            else:
+                lines.append("- *(No explicit negative prohibitions declared)*")
+            lines.append("")
+
+        # Audit result & findings
+        lines.append("## 🔍 Autonomous Audit Result")
+        if audit_report:
+            outcome = getattr(audit_report, "outcome", None)
+            outcome_val = str(outcome.value) if (outcome is not None and hasattr(outcome, "value")) else str(audit_report.get("outcome", "UNKNOWN") if isinstance(audit_report, dict) else "UNKNOWN")
+            cov = getattr(audit_report, "coverage_score", None) or (audit_report.get("coverage_score") if isinstance(audit_report, dict) else "1.0")
+            lines.append(f"- **Outcome:** `{outcome_val}`")
+            lines.append(f"- **Requirement Coverage:** `{cov}`")
+
+            # Scope items
+            scope_items = getattr(audit_report, "scope_items", []) or (audit_report.get("scope_items", []) if isinstance(audit_report, dict) else [])
+            if scope_items:
+                lines.extend([
+                    "",
+                    "## 🔎 Classified Scope Additions",
+                    "| Feature / Component | Classification | Rationale |",
+                    "|:---|:---:|:---|"
+                ])
+                for s in scope_items:
+                    fname = getattr(s, "feature_name", None) or (s.get("feature_name", "unknown") if isinstance(s, dict) else "unknown")
+                    cval = getattr(s, "classification", None)
+                    c_str = str(cval.value) if (cval is not None and hasattr(cval, "value")) else str(s.get("classification", "DETAIL") if isinstance(s, dict) else "DETAIL")
+                    rat = getattr(s, "rationale", None) or (s.get("rationale", "") if isinstance(s, dict) else "")
+                    lines.append(f"| `{fname}` | `{c_str}` | {rat} |")
+
+            # Findings
+            findings = getattr(audit_report, "findings", []) or (audit_report.get("findings", []) if isinstance(audit_report, dict) else [])
+            if findings:
+                lines.extend([
+                    "",
+                    "## ⚠️ Audit Findings & Observations",
+                ])
+                for f in findings:
+                    sev = getattr(f, "severity", None) or (f.get("severity", "INFO") if isinstance(f, dict) else "INFO")
+                    desc = getattr(f, "description", None) or (f.get("description", str(f)) if isinstance(f, dict) else str(f))
+                    lines.append(f"- **[{sev}]** {desc}")
+
+            # Assumptions
+            assumptions = getattr(audit_report, "assumptions", []) or (audit_report.get("assumptions", []) if isinstance(audit_report, dict) else [])
+            if assumptions:
+                lines.extend([
+                    "",
+                    "## 🧠 Remaining Assumptions",
+                ])
+                for a in assumptions:
+                    lines.append(f"- {a}")
+        else:
+            lines.append("- *Audit report pending or verified via baseline checker.*")
+
+        # Retrieved experience summary
+        lines.extend([
+            "",
+            "## 📚 Retrieved Experience Summary",
+        ])
+        if retrieved_skills:
+            lines.append(f"- **Procedural Skills Applied:** {len(retrieved_skills)}")
+            for sk in retrieved_skills:
+                title = sk.get("title", "Skill") if isinstance(sk, dict) else getattr(sk, "title", "Skill")
+                lines.append(f"  - `{title}`")
+        if retrieved_lessons:
+            lines.append(f"- **Failure Warnings Checked:** {len(retrieved_lessons)}")
+            for ls in retrieved_lessons:
+                title = ls.get("title", "Lesson") if isinstance(ls, dict) else getattr(ls, "title", "Lesson")
+                lines.append(f"  - `{title}`")
+        if not retrieved_skills and not retrieved_lessons:
+            lines.append("- *No prior historical skills or failure warnings retrieved.*")
+
+        lines.extend([
+            "",
+            "## 📝 Approved Technical Specification",
+            "```markdown",
+            spec_md[:2000] + ("\n... [truncated for display]" if len(spec_md) > 2000 else ""),
+            "```"
+        ])
+        return "\n".join(lines)
+
+    @classmethod
+    def validate_specification_approval(
+        cls,
+        spec_md: str,
+        intent: Any = None,
+        audit_report: Any = None,
+    ) -> tuple[bool, list[str]]:
+        """Guarantees that human approval of an invalid specification cannot override hard prohibitions.
+        Only a PASSED specification can enter or receive valid human approval."""
+        reasons: list[str] = []
+
+        if audit_report:
+            outcome = getattr(audit_report, "outcome", None)
+            outcome_str = str(outcome.value) if (outcome is not None and hasattr(outcome, "value")) else str(audit_report.get("outcome", "") if isinstance(audit_report, dict) else "")
+            if outcome_str and outcome_str != "PASSED":
+                reasons.append(f"Cannot approve specification: Autonomous audit outcome is '{outcome_str}' (expected 'PASSED').")
+
+        # Invariant: Hard prohibitions can NEVER be overridden by approval
+        if intent and hasattr(intent, "get_prohibitions"):
+            prohibitions = intent.get_prohibitions()
+            spec_lower = spec_md.lower()
+            for p in prohibitions:
+                p_norm = p.normalized_description.lower()
+                # Check for direct prohibited terms in function/class names
+                if f"def validate_{p_norm}" in spec_lower or f"class {p_norm}" in spec_lower or ("jwt" in p_norm and "validate_jwt" in spec_lower):
+                    reasons.append(
+                        f"IMMUTABLE CONSTRAINT VIOLATION: Specification violates hard prohibition '{p.normalized_description}'. "
+                        "Human approval cannot override the immutable constraint ledger."
+                    )
+
+        passed = (len(reasons) == 0)
+        return passed, reasons
+
+    @classmethod
     def validate_approval(
         cls,
         decision: ApprovalDecision | None,

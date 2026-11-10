@@ -86,7 +86,6 @@ except ImportError:
 try:
     from intent_engine import (
         ConstraintCompiler,
-        ConstraintValidator,
         IntentGuard,
         StructuredIntent,
     )
@@ -94,7 +93,6 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from intent_engine import (
         ConstraintCompiler,
-        ConstraintValidator,
         IntentGuard,
         StructuredIntent,
     )
@@ -109,6 +107,7 @@ try:
         RetrievedExperienceContext,
         SkillExtractor,
     )
+    from specification_auditor import AuditEngine
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from experience_engine import (
@@ -120,6 +119,7 @@ except ImportError:
         RetrievedExperienceContext,
         SkillExtractor,
     )
+    from specification_auditor import AuditEngine
 
 # Strip proxy variables that interfere with local endpoints
 for env_var in (
@@ -292,6 +292,8 @@ class HydramedaState(TypedDict, total=False):
     structured_intent: dict[str, Any]
     retrieved_skills: list[dict[str, Any]]
     retrieved_lessons: list[dict[str, Any]]
+    specification_audit_report: dict[str, Any]
+    specification_audit_outcome: str
 
     # Node 5 & 6 outputs: governance & routing
     approval_status: str       # "PENDING" | "APPROVED" | "REJECTED"
@@ -644,40 +646,93 @@ def node_spec_validator(state: HydramedaState) -> HydramedaState:
     reqs = TaskRequirements.from_dict(state.get("task_requirements"))
     vault_ctx = state.get("vault_context", "")
 
-    report = validate_specification_fidelity(
-        user_prompt=prompt,
-        spec_md=spec,
-        task_requirements=reqs,
-        vault_context=vault_ctx
-    )
-
-    # Double-check with Intent Engine ConstraintValidator
-    if report.passed and state.get("structured_intent"):
+    # Phase 4: Hybrid Autonomous Prompt & Specification Auditor
+    intent = None
+    if state.get("structured_intent"):
         intent = StructuredIntent.from_dict(state.get("structured_intent"))
-        cv_report = ConstraintValidator(intent).validate_specification(spec, vault_context=vault_ctx)
-        if not cv_report.passed:
-            report = cv_report
+    elif prompt:
+        intent = ConstraintCompiler.compile(prompt)
 
-    if report.passed:
-        state["specification_fidelity_status"] = "PASSED"
-        state["specification_constraint_violations"] = []
-        state["specification_rejection_reason"] = ""
-        state["fidelity_feedback"] = ""
-        state["original_requirements_preserved"] = True
-        log_event(state, node, "SUCCESS", f"Specification fidelity verified on attempt {attempts}/3.")
+    if intent:
+        audit_rep = AuditEngine.audit_specification(
+            intent=intent,
+            spec_md=spec,
+            vault_context=vault_ctx,
+            retrieved_skills=state.get("retrieved_skills", []),
+            retrieved_lessons=state.get("retrieved_lessons", []),
+        )
+        state["specification_audit_report"] = audit_rep.to_dict()
+        state["specification_audit_outcome"] = audit_rep.outcome.value
+
+        # Baseline fidelity check for complete backwards-compatibility
+        base_rep = validate_specification_fidelity(
+            user_prompt=prompt,
+            spec_md=spec,
+            task_requirements=reqs,
+            vault_context=vault_ctx
+        )
+
+        overall_passed = audit_rep.passed and base_rep.passed
+        if overall_passed:
+            state["specification_fidelity_status"] = "PASSED"
+            state["specification_constraint_violations"] = []
+            state["specification_rejection_reason"] = ""
+            state["fidelity_feedback"] = ""
+            state["original_requirements_preserved"] = True
+            log_event(state, node, "SUCCESS", f"Specification audit PASSED on attempt {attempts}/3 (coverage: {audit_rep.coverage_score}).")
+        else:
+            state["specification_fidelity_status"] = "FAILED"
+            violations = list(audit_rep.prohibition_violations)
+            for v in base_rep.violations:
+                if v not in violations:
+                    violations.append(v)
+            if not violations:
+                violations = [f.description for f in audit_rep.findings if f.severity in ("CRITICAL", "HIGH")]
+
+            state["specification_constraint_violations"] = violations
+            state["specification_rejection_reason"] = "; ".join(violations)
+            feedback_items = []
+            if audit_rep.actionable_feedback:
+                feedback_items.append(audit_rep.actionable_feedback)
+            if base_rep.actionable_feedback and base_rep.actionable_feedback not in audit_rep.actionable_feedback:
+                feedback_items.append(base_rep.actionable_feedback)
+            state["fidelity_feedback"] = "\n\n".join(feedback_items)
+            state["original_requirements_preserved"] = False
+            log_event(state, node, "WARN", f"Specification audit REJECTED (attempt {attempts}/3): {state['specification_rejection_reason']}")
+
+            if attempts >= 3:
+                state["task_state"] = TaskState.FAILED.value
+                state["status"] = "FAILED"
+                state["error"] = f"Specification fidelity validation failed after 3 attempts: {state['specification_rejection_reason']}"
+                log_event(state, node, "ERROR", "Max specification validation attempts reached (3/3). Halting execution.")
     else:
-        state["specification_fidelity_status"] = "FAILED"
-        state["specification_constraint_violations"] = report.violations
-        state["specification_rejection_reason"] = "; ".join(report.violations)
-        state["fidelity_feedback"] = report.actionable_feedback
-        state["original_requirements_preserved"] = False
-        log_event(state, node, "WARN", f"Specification fidelity rejected (attempt {attempts}/3): {'; '.join(report.violations)}")
+        report = validate_specification_fidelity(
+            user_prompt=prompt,
+            spec_md=spec,
+            task_requirements=reqs,
+            vault_context=vault_ctx
+        )
 
-        if attempts >= 3:
-            state["task_state"] = TaskState.FAILED.value
-            state["status"] = "FAILED"
-            state["error"] = f"Specification fidelity validation failed after 3 attempts: {state['specification_rejection_reason']}"
-            log_event(state, node, "ERROR", "Max specification validation attempts reached (3/3). Halting execution.")
+        if report.passed:
+            state["specification_fidelity_status"] = "PASSED"
+            state["specification_constraint_violations"] = []
+            state["specification_rejection_reason"] = ""
+            state["fidelity_feedback"] = ""
+            state["original_requirements_preserved"] = True
+            log_event(state, node, "SUCCESS", f"Specification fidelity verified on attempt {attempts}/3.")
+        else:
+            state["specification_fidelity_status"] = "FAILED"
+            state["specification_constraint_violations"] = report.violations
+            state["specification_rejection_reason"] = "; ".join(report.violations)
+            state["fidelity_feedback"] = report.actionable_feedback
+            state["original_requirements_preserved"] = False
+            log_event(state, node, "WARN", f"Specification fidelity rejected (attempt {attempts}/3): {'; '.join(report.violations)}")
+
+            if attempts >= 3:
+                state["task_state"] = TaskState.FAILED.value
+                state["status"] = "FAILED"
+                state["error"] = f"Specification fidelity validation failed after 3 attempts: {state['specification_rejection_reason']}"
+                log_event(state, node, "ERROR", "Max specification validation attempts reached (3/3). Halting execution.")
 
     return state
 
@@ -772,6 +827,17 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         state["task_state"] = TaskState.PLANNING.value
         return state
 
+    # Phase 5: Only a PASSED specification can enter human approval
+    if state.get("specification_fidelity_status") == "FAILED" or (
+        state.get("specification_audit_outcome") and state.get("specification_audit_outcome") != "PASSED"
+    ):
+        log_event(state, node, "ERROR", "Approval gate blocked: specification failed autonomous audit or constraint verification.")
+        state["approval_status"] = "REJECTED"
+        state["specification_approval_status"] = "REJECTED"
+        state["task_state"] = TaskState.CANCELLED.value
+        state["route"] = "cancel"
+        return state
+
     # Requirement A2.5/A2.6: Auto-approval requires an explicit trusted execution policy
     ALLOWED_TRUSTED_POLICIES = {"ci_automation", "eval_harness", "internal_trusted", "batch_backlog", "cli_authorized"}
     trusted_policy = state.get("trusted_policy") or os.getenv("HYDRAMEDA_TRUSTED_POLICY")
@@ -789,6 +855,19 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         else:
             log_event(state, node, "WARN", f"Untrusted auto-approval attempt rejected (trusted_policy='{trusted_policy}'). Awaiting human review.")
 
+    # Phase 5: Build rich specification approval review display
+    intent = StructuredIntent.from_dict(state.get("structured_intent")) if state.get("structured_intent") else None
+    audit_rep = state.get("specification_audit_report")
+    review_display = GovernanceEngine.format_specification_approval_display(
+        task_id=state.get("task_id", ""),
+        user_prompt=state.get("user_prompt", ""),
+        spec_md=state.get("spec_md", ""),
+        intent=intent,
+        audit_report=audit_rep,
+        retrieved_skills=state.get("retrieved_skills"),
+        retrieved_lessons=state.get("retrieved_lessons"),
+    )
+
     # Trigger LangGraph interrupt for human-in-the-loop review
     state["task_state"] = TaskState.AWAITING_APPROVAL.value
     log_event(state, node, "INFO", "Interrupting for human review...")
@@ -796,6 +875,7 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         "action": "review_specification",
         "task_id": state.get("task_id"),
         "spec_preview": state.get("spec_md", "")[:500],
+        "review_display": review_display,
         "question": "Approve technical specification for autonomous build? [approved: True/False]"
     })
 
@@ -816,6 +896,23 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         approved = True
     else:
         approved = False
+
+    # Phase 5 Invariant: Human approval cannot override hard constraint prohibitions
+    if approved:
+        is_valid, validation_errors = GovernanceEngine.validate_specification_approval(
+            spec_md=state.get("spec_md", ""),
+            intent=intent,
+            audit_report=audit_rep,
+        )
+        if not is_valid:
+            approved = False
+            log_event(
+                state,
+                node,
+                "ERROR",
+                f"Human approval overridden by immutable constraint ledger: {'; '.join(validation_errors)}"
+            )
+            state["error"] = f"Approval rejected by governance ledger: {'; '.join(validation_errors)}"
 
     status_str = "APPROVED" if approved else "REJECTED"
     state["approval_status"] = status_str

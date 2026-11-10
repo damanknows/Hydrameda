@@ -73,7 +73,12 @@ def test_multi_interrupt_specification_and_consolidation_lifecycle():
 
     def mock_llm_handler(role, prompt):
         if "Architect" in prompt:
-            return "# Spec for Token Bucket", "mock-architect"
+            return (
+                "# Spec for Token Bucket\n"
+                "Create a rate limiter module.\n"
+                "Define check() -> bool.\n"
+                "Includes pytest tests."
+            ), "mock-architect"
         elif "Repair" in prompt or "Coder" in prompt:
             return '<file name="module.py">\ndef check(): return True\n</file>\n<file name="test_module.py">\nfrom module import check\ndef test_check(): assert check()\n</file>', "mock-coder"
         return "Summary", "mock-model"
