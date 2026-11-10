@@ -5,9 +5,10 @@ Uses lexical matching, symbol intersection, and dependency graphs
 to identify the exact subset of files that must be read or modified for a task.
 """
 from __future__ import annotations
+
 import re
-from pathlib import Path
-from typing import List, Dict, Set, Any
+from typing import Any
+
 from .repository_mapper import RepositoryMapper
 
 
@@ -16,9 +17,9 @@ class FileSelector:
 
     def __init__(self, mapper: RepositoryMapper):
         self.mapper = mapper
-        self._cached_map: Dict[str, Any] = mapper.map_repository()
+        self._cached_map: dict[str, Any] = mapper.map_repository()
 
-    def select_relevant_files(self, prompt: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def select_relevant_files(self, prompt: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Scores repository files against task prompt keywords and symbol names."""
         keywords = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", prompt.lower()))
         scored_files = []
@@ -57,7 +58,7 @@ class FileSelector:
         scored_files.sort(key=lambda x: x["score"], reverse=True)
         return scored_files[:top_k]
 
-    def get_related_dependencies(self, selected_files: List[str]) -> Set[str]:
+    def get_related_dependencies(self, selected_files: list[str]) -> set[str]:
         """Finds all internal and external dependencies referenced by selected files."""
         deps = set()
         selected_set = set(selected_files)

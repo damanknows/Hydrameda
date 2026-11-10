@@ -15,11 +15,11 @@ Security & Integrity Rules:
 8. TOCTOU defense: Resolves and validates all paths before reading, modifying, or deleting.
 """
 from __future__ import annotations
+
 import hashlib
-import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+
 from .change_manifest import ChangeManifest, FileChange, FileOperation
 
 PROTECTED_PATHS = {
@@ -27,10 +27,17 @@ PROTECTED_PATHS = {
     ".ssh", ".bashrc", ".profile", ".gitconfig"
 }
 
+# External framework packages that must never be shadowed or created as local stubs
+PROTECTED_SHADOW_PACKAGES = {
+    "litellm", "langgraph", "tree_sitter_language_pack", "pytest", "ruff",
+    "mypy", "bandit", "pydantic", "fastapi", "uvicorn", "cryptography",
+    "jwt", "requests", "httpx", "dotenv", "langsmith", "anthropic",
+    "openai", "google", "numpy", "torch", "pandas", "scipy"
+}
+
 
 class ValidationError(Exception):
     """Raised when a patch or file change violates safety constraints."""
-    pass
 
 
 class PatchValidator:
@@ -58,7 +65,7 @@ class PatchValidator:
         clean_path = rel_path.strip()
 
         # 3. Deny absolute paths (POSIX and Windows drive / UNC)
-        if clean_path.startswith("/") or clean_path.startswith("\\") or re.match(r"^[a-zA-Z]:", clean_path):
+        if clean_path.startswith(("/", "\\")) or re.match(r"^[a-zA-Z]:", clean_path):
             raise ValidationError(f"Path traversal detected: absolute paths not allowed: '{clean_path}'")
 
         p = Path(clean_path)
@@ -120,6 +127,14 @@ class PatchValidator:
         exists = target_path.exists()
 
         if change.operation == FileOperation.CREATE:
+            parts = Path(change.file_path).parts
+            top_part = parts[0].replace(".py", "") if parts else ""
+            stem = Path(change.file_path).stem
+            if top_part in PROTECTED_SHADOW_PACKAGES or (len(parts) == 1 and stem in PROTECTED_SHADOW_PACKAGES):
+                raise ValidationError(
+                    f"Creating fake or shadowing third-party package/module '{change.file_path}' is strictly prohibited."
+                )
+
             if exists:
                 raise ValidationError(f"Cannot CREATE existing file '{change.file_path}'. Use MODIFY instead.")
             if change.proposed_content is None:
@@ -152,7 +167,7 @@ class PatchValidator:
 
         return target_path
 
-    def validate_manifest(self, manifest: ChangeManifest) -> List[str]:
+    def validate_manifest(self, manifest: ChangeManifest) -> list[str]:
         """Validates all changes in a manifest. Returns list of verified target paths or raises ValidationError."""
         verified_paths = []
         for change in manifest.changes:

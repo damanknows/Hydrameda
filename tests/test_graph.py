@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Test suite for Hydrameda 12-Node Neuro-Symbolic LangGraph Engine.
 
@@ -11,9 +10,10 @@ Covers:
  6. Interrupted execution and resume via LangGraph Command
  7. Node exceptions handling
 """
-import pytest
 import sys
 from pathlib import Path
+
+import pytest
 
 # Ensure langgraph_engine is in sys.path
 ENGINE_DIR = Path(__file__).resolve().parent.parent / "langgraph_engine"
@@ -53,6 +53,7 @@ def make_initial_state(task_id: str, auto_approve: bool = True, **overrides) -> 
         "user_prompt": "Create an addition function with pytest tests",
         "repo_path": str(Path(__file__).parent.parent),
         "auto_approve": auto_approve,
+        "trusted_policy": "eval_harness" if auto_approve else "",
         "approval_status": "PENDING",
         "route": "execute",
         "task_analysis": {},
@@ -209,7 +210,7 @@ def test_human_rejection():
     config = {"configurable": {"thread_id": task_id}}
 
     # Run until approval_gate interrupt
-    res = app.invoke(initial_state, config)
+    app.invoke(initial_state, config)
     snapshot = app.get_state(config)
     assert len(snapshot.tasks[0].interrupts) > 0
 
@@ -271,3 +272,82 @@ def test_node_exception_handling():
     assert "user_prompt cannot be empty" in final_state["error"]
     error_logs = [log for log in final_state["structured_logs"] if log["level"] == "ERROR"]
     assert len(error_logs) > 0
+
+
+# ============================================================================
+# 8. Remediation Sprint: Fidelity, Consolidation Semantics, & Repair Logs
+# ============================================================================
+def test_specification_fidelity_validation():
+    """Verifies that unrequested protocol expansion (e.g. JWT for HMAC prompt) is detected."""
+    from langgraph_engine.graph import validate_specification_fidelity
+
+    # Case 1: User requested HMAC SHA256, but LLM produced JWT specification
+    hmac_prompt = "Create an HMAC-SHA256 token signer and verifier using standard library."
+    jwt_spec = "# Technical Specification\n## JWT Token Generation\nUse JSON Web Token (jwt) for jwt auth and jwt verifier."
+
+    passed, msg = validate_specification_fidelity(hmac_prompt, jwt_spec)
+    assert passed is False
+    assert "JSON Web Token (JWT)" in msg
+
+    # Case 2: User explicitly requested JWT
+    explicit_jwt_prompt = "Create a JWT validator in Python."
+    passed_jwt, _ = validate_specification_fidelity(explicit_jwt_prompt, jwt_spec)
+    assert passed_jwt is True
+
+    # Case 3: Proper HMAC spec for HMAC prompt
+    hmac_spec = "# Technical Specification\n## HMAC-SHA256 Signer\nUse hmac and hashlib to compute signature."
+    passed_hmac, _ = validate_specification_fidelity(hmac_prompt, hmac_spec)
+    assert passed_hmac is True
+
+
+def test_consolidation_status_not_reached_on_failed_verification():
+    """Verifies that failed verification records consolidation_status='NOT_REACHED' and preserves spec approval."""
+    app = graph.build_hydrameda_graph(checkpointer=MemorySaver())
+
+    # Mock verifier to fail
+    graph.set_verifier_handler(lambda state: (1, "FAILED test_module.py::test_fail - AssertionError"))
+
+    task_id = "test-not-reached-01"
+    initial_state = make_initial_state(task_id, auto_approve=True)
+    initial_state["trusted_policy"] = "eval_harness"
+    config = {"configurable": {"thread_id": task_id}}
+
+    final_state = app.invoke(initial_state, config)
+
+    assert final_state["status"] == "FAILED"
+    assert final_state["specification_approval_status"] == "APPROVED"
+    assert final_state["consolidation_status"] == "NOT_REACHED"
+    assert "Verification did not pass" in final_state["consolidation_skip_reason"]
+
+    exec_report = final_state.get("execution_report", {})
+    assert exec_report["consolidation_status"] == "NOT_REACHED"
+    assert exec_report["specification_approval_status"] == "APPROVED"
+    assert exec_report["approval_decision"] is None
+
+
+def test_repair_agent_logging_semantics():
+    """Verifies that applying a repair patch logs INFO (awaiting verification) rather than claiming premature SUCCESS."""
+    state = make_initial_state("test-repair-log-01")
+    state["spec_md"] = "# Spec\nmodule.py and test_module.py"
+    state["current_files"] = {"module.py": "def foo(): return 1\n", "test_module.py": "def test(): pass\n"}
+    state["error_analysis"] = {"category": "SYNTAX_ERROR", "actionable_guidance": "Fix syntax"}
+    state["pytest_stderr"] = "SyntaxError"
+    state["worktree_path"] = ""  # in-memory
+
+    graph.set_llm_handler(lambda role, prompt: (
+        (
+            '<file name="module.py">\ndef foo(): return 2\n</file>\n'
+            '<file name="test_module.py">\ndef test(): assert True\n</file>'
+        ),
+        "test-repairer"
+    ))
+
+    result = graph.node_repair_agent(state)
+
+    repair_logs = [log for log in result["structured_logs"] if log["node"] == "repair_agent"]
+    assert len(repair_logs) >= 2
+    # The patch application log must be INFO with 'Awaiting verification...', not premature SUCCESS
+    patch_log = next(log for log in repair_logs if "Applied repair patch" in log["message"])
+    assert patch_log["level"] == "INFO"
+    assert "Awaiting verification..." in patch_log["message"]
+

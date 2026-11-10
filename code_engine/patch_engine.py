@@ -9,21 +9,23 @@ Guarantees:
 5. Isolation: Operates strictly inside target Git worktree; rejects symlinks escaping worktree.
 """
 from __future__ import annotations
+
 import logging
+import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any
+
 from .change_manifest import ChangeManifest, FileChange, FileOperation
-from .patch_validator import PatchValidator, ValidationError
 from .diff_generator import DiffGenerator
+from .patch_validator import PROTECTED_SHADOW_PACKAGES, PatchValidator, ValidationError
 
 logger = logging.getLogger(__name__)
 
 
 class PatchApplicationError(Exception):
     """Raised when patch application fails during write or backup."""
-    pass
 
 
 class PatchEngine:
@@ -35,7 +37,7 @@ class PatchEngine:
             raise FileNotFoundError(f"Target worktree not found: {self.worktree}")
         self.validator = PatchValidator(self.worktree, allow_delete=allow_delete)
 
-    def prepare_manifest(self, changes: List[Dict[str, Any]], description: str = "", task_id: str = "") -> ChangeManifest:
+    def prepare_manifest(self, changes: list[dict[str, Any]], description: str = "", task_id: str = "") -> ChangeManifest:
         """Constructs a ChangeManifest, validating every path BEFORE reading content or calculating diffs."""
         manifest = ChangeManifest(
             task_id=task_id or "unassigned",
@@ -51,6 +53,15 @@ class PatchEngine:
             op = FileOperation(c_data["operation"])
             proposed_content = c_data.get("proposed_content")
             authorized = c_data.get("authorized", False)
+
+            if op == FileOperation.CREATE:
+                parts = Path(rel_path).parts
+                top_part = parts[0].replace(".py", "") if parts else ""
+                stem = Path(rel_path).stem
+                if top_part in PROTECTED_SHADOW_PACKAGES or (len(parts) == 1 and stem in PROTECTED_SHADOW_PACKAGES):
+                    raise ValidationError(
+                        f"Creating fake or shadowing third-party package/module '{rel_path}' is strictly prohibited."
+                    )
 
             orig_content = None
             # STEP 2: Re-verify boundary and symlinks to prevent TOCTOU escapes before reading
@@ -81,7 +92,7 @@ class PatchEngine:
         # Step 1: Pre-validation of all changes before any disk write
         self.validator.validate_manifest(manifest)
 
-        applied_changes: List[FileChange] = []
+        applied_changes: list[FileChange] = []
         backup_dir = Path(tempfile.mkdtemp(prefix=f"hydrameda_backup_{manifest.task_id}_"))
 
         try:
@@ -95,13 +106,40 @@ class PatchEngine:
                     shutil.copy2(target_path, b_path)
                     change.backup_path = str(b_path)
 
-                # Step 3: Execute file operation
+                # Step 3: Execute file operation with atomic write and permission preservation
                 if change.operation == FileOperation.CREATE:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
-                    target_path.write_text(change.proposed_content or "", encoding="utf-8")
+                    try:
+                        os.chmod(target_path.parent, 0o755)
+                    except OSError:
+                        pass
+                    tmp_fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".hydra_atomic_tmp_")
+                    try:
+                        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                            f.write(change.proposed_content or "")
+                        os.chmod(tmp_file, 0o644)
+                        os.replace(tmp_file, target_path)
+                    except Exception:
+                        if Path(tmp_file).exists():
+                            Path(tmp_file).unlink(missing_ok=True)
+                        raise
 
                 elif change.operation == FileOperation.MODIFY:
-                    target_path.write_text(change.proposed_content or "", encoding="utf-8")
+                    orig_stat = target_path.stat() if target_path.exists() else None
+                    tmp_fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".hydra_atomic_tmp_")
+                    try:
+                        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                            f.write(change.proposed_content or "")
+                        if orig_stat is not None:
+                            shutil.copystat(target_path, tmp_file)
+                            os.chmod(tmp_file, orig_stat.st_mode | 0o644)
+                        else:
+                            os.chmod(tmp_file, 0o644)
+                        os.replace(tmp_file, target_path)
+                    except Exception:
+                        if Path(tmp_file).exists():
+                            Path(tmp_file).unlink(missing_ok=True)
+                        raise
 
                 elif change.operation == FileOperation.DELETE:
                     target_path.unlink()
@@ -155,7 +193,7 @@ class PatchEngine:
             )
             return False
 
-    def _rollback_applied(self, changes: List[FileChange]) -> Tuple[bool, Dict[str, str], List[str]]:
+    def _rollback_applied(self, changes: list[FileChange]) -> tuple[bool, dict[str, str], list[str]]:
         """Reverts applied changes in reverse order.
         
         Guarantees:
@@ -163,13 +201,13 @@ class PatchEngine:
         - Tracks restoration success per file.
         - Returns failure flag and mapping of failed files to error reasons.
         """
-        failed_files: Dict[str, str] = {}
-        restored_files: List[str] = []
+        failed_files: dict[str, str] = {}
+        restored_files: list[str] = []
 
         for change in reversed(changes):
             try:
                 target_path = self.validator.validate_path_safety(change.file_path)
-            except Exception as val_err:
+            except (ValidationError, OSError) as val_err:
                 failed_files[change.file_path] = f"Validation failed during rollback: {val_err}"
                 continue
 
@@ -185,7 +223,7 @@ class PatchEngine:
                         restored_files.append(change.file_path)
                     else:
                         failed_files[change.file_path] = f"Backup file missing or unreadable: {change.backup_path}"
-            except Exception as exc:
+            except OSError as exc:
                 failed_files[change.file_path] = str(exc)
                 logger.error(f"Rollback error on '{change.file_path}': {exc}")
 

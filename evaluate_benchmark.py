@@ -30,10 +30,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 DEFAULT_REPO = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda")).resolve()
 DEFAULT_BENCH_DIR = DEFAULT_REPO / "benchmarks"
-DEFAULT_BIN = Path.home() / ".local" / "bin" / "hydrameda"
+DEFAULT_BIN = (DEFAULT_REPO / "scripts" / "hydrameda") if (DEFAULT_REPO / "scripts" / "hydrameda").exists() else (Path.home() / ".local" / "bin" / "hydrameda")
 DEFAULT_VAULT = Path(os.getenv("OBSIDIAN_VAULT_PATH", Path.home() / "ObsidianVault")).resolve()
 DEFAULT_REPORT_MD = DEFAULT_VAULT / "Lessons-Learned" / "Hydrameda-Benchmark-Report.md"
 DEFAULT_REPORT_JSON = DEFAULT_BENCH_DIR / "benchmark_results.json"
@@ -46,8 +47,8 @@ def get_environment_info(repo_path: Path) -> dict:
     try:
         res = subprocess.run(["git", "-C", str(repo_path), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
         git_commit = res.stdout.strip() or "unknown"
-    except Exception:
-        pass
+    except (subprocess.SubprocessError, OSError):
+        git_commit = "unknown"
 
     return {
         "python_version": sys.version.split()[0],
@@ -100,7 +101,7 @@ def write_reports(
     avg_time = round(sum(r["elapsed_sec"] for r in results) / max(total, 1), 2)
 
     # Category breakdown
-    categories = {}
+    categories: dict[str, dict[str, Any]] = {}
     for r in results:
         cat = r.get("category", "General")
         c = categories.setdefault(cat, {
@@ -155,7 +156,7 @@ def write_reports(
             ts = int(time.time())
             archive_file = archive_dir / f"benchmark_results_{ts}.json"
             shutil.copy2(results_path, archive_file)
-        except Exception as arch_err:
+        except OSError as arch_err:
             print(f"⚠️ Warning: Could not archive previous benchmark results: {arch_err}")
 
     # Write JSON results
@@ -212,7 +213,7 @@ def write_reports(
     try:
         report_md.parent.mkdir(parents=True, exist_ok=True)
         report_md.write_text("\n".join(md) + "\n", encoding="utf-8")
-    except Exception as md_err:
+    except OSError as md_err:
         print(f"⚠️ Warning: Could not write Obsidian markdown report: {md_err}")
 
     return summary
@@ -239,6 +240,10 @@ def main():
     report_md = Path(args.report_md).resolve()
     archive_dir = Path(args.archive_dir).resolve()
     bin_path = Path(args.bin_path).resolve()
+    if not bin_path.exists():
+        repo_script = repo_path / "scripts" / "hydrameda"
+        if repo_script.exists():
+            bin_path = repo_script
 
     limit = args.legacy_limit if args.legacy_limit is not None else args.limit
     suite_name = "mini" if (args.legacy_limit is not None and args.suite == "all") else args.suite
@@ -254,8 +259,8 @@ def main():
             existing_results = [t for t in prev.get("tasks", []) if t.get("passed")]
             completed_ids = {t["task_id"] for t in existing_results}
             print(f"🔄 Resuming: keeping {len(completed_ids)} previously passed tasks.")
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as resume_err:
+            print(f"⚠️ Warning: Could not resume from previous benchmark results: {resume_err}")
 
     results = list(existing_results)
     print("=" * 76)
@@ -298,7 +303,7 @@ def main():
             proc.wait()
             if proc.returncode != 0:
                 is_execution_failure = True
-        except Exception as exec_err:
+        except (subprocess.SubprocessError, OSError) as exec_err:
             is_execution_failure = True
             captured.append(f"Execution exception: {exec_err}\n")
 

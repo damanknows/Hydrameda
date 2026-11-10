@@ -2,95 +2,116 @@
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any
 
-from verification_engine.models import (
-    CheckResult,
-    CheckStatus,
-    CheckName,
-    VerificationReport
-)
+from verification_engine.models import CheckName, CheckResult, CheckStatus, VerificationReport
+from verification_engine.sandbox_runner import SandboxRunner
 from verification_engine.static_checks import (
-    run_syntax_check,
     run_ast_structural_check,
+    run_dependency_security_check,
     run_import_resolution_check,
-    run_dependency_security_check
+    run_syntax_check,
 )
-from verification_engine.sandbox_runner import SandboxRunner, SandboxConfig
 
 
 class VerificationPipeline:
     """Orchestrates independent, deterministic verification across all 8 checks."""
 
-    def __init__(self, sandbox_runner: Optional[SandboxRunner] = None):
+    def __init__(self, sandbox_runner: SandboxRunner | None = None):
         self.runner = sandbox_runner or SandboxRunner()
 
     def run_all_checks(
         self,
         worktree_path: Path,
         task_id: str = "task-verify",
+        target_files: list[str] | None = None,
         fail_fast: bool = False
     ) -> VerificationReport:
         """Executes all 8 deterministic verification checks in strict order."""
         total_start = time.perf_counter()
-        checks: Dict[str, CheckResult] = {}
+        checks: dict[str, CheckResult] = {}
         wt = Path(worktree_path).resolve()
 
         # Phase 1: Local Static & AST Checks
         # 1. Syntax Validation
-        res_syntax = run_syntax_check(wt)
+        res_syntax = run_syntax_check(wt, target_files=target_files)
         checks[CheckName.SYNTAX.value] = res_syntax
         if fail_fast and res_syntax.status == CheckStatus.FAILED:
             return self._build_report(task_id, checks, total_start)
 
         # 2. AST & Structural Validation
-        res_ast = run_ast_structural_check(wt)
+        res_ast = run_ast_structural_check(wt, target_files=target_files)
         checks[CheckName.AST_STRUCTURE.value] = res_ast
         if fail_fast and res_ast.status == CheckStatus.FAILED:
             return self._build_report(task_id, checks, total_start)
 
         # 3. Import Resolution
-        res_import = run_import_resolution_check(wt)
+        res_import = run_import_resolution_check(wt, target_files=target_files)
         checks[CheckName.IMPORT_RESOLUTION.value] = res_import
         if fail_fast and res_import.status == CheckStatus.FAILED:
             return self._build_report(task_id, checks, total_start)
 
+        # Format scoped target arguments if target_files provided
+        target_args = ""
+        if target_files:
+            target_args = " ".join(f"/tmp/work/{Path(t).as_posix()}" for t in target_files)
+
         # Phase 2: Secure Sandbox Static Analysis & Security Scans
         # 4. Ruff
-        ruff_cmd = "ruff check --select E9,F63,F7,F82 --cache-dir /tmp/ruff_cache /tmp/work"
+        ruff_target = target_args if target_args else "/tmp/work"
+        ruff_cmd = f"ruff check --select E9,F63,F7,F82 --cache-dir /tmp/ruff_cache {ruff_target}"
         res_ruff = self.runner.run_tool_check(wt, ruff_cmd, CheckName.RUFF)
         checks[CheckName.RUFF.value] = res_ruff
         if fail_fast and res_ruff.status == CheckStatus.FAILED:
             return self._build_report(task_id, checks, total_start)
 
         # 5. Mypy
-        mypy_cmd = "mypy --ignore-missing-imports --cache-dir /tmp/mypy_cache /tmp/work"
+        mypy_target = target_args if target_args else "/tmp/work"
+        mypy_cmd = f"mypy --ignore-missing-imports --cache-dir /tmp/mypy_cache {mypy_target}"
         res_mypy = self.runner.run_tool_check(wt, mypy_cmd, CheckName.MYPY)
         checks[CheckName.MYPY.value] = res_mypy
         if fail_fast and res_mypy.status == CheckStatus.FAILED:
             return self._build_report(task_id, checks, total_start)
 
         # 6. Bandit SAST Security Scan
-        bandit_cmd = (
-            "if command -v bandit >/dev/null 2>&1; then "
-            "bandit -q -r /tmp/work -x '*/test_*.py,*/*_test.py' -s B101,B105,B106,B107; "
-            "else echo 'Bandit not installed'; exit 1; fi"
-        )
-        res_bandit = self.runner.run_tool_check(wt, bandit_cmd, CheckName.BANDIT)
+        non_test_targets = [
+            f"/tmp/work/{Path(t).as_posix()}" for t in (target_files or [])
+            if not Path(t).name.startswith("test_") and not Path(t).name.endswith("_test.py")
+        ]
+        if target_files and not non_test_targets:
+            res_bandit = CheckResult(
+                name=CheckName.BANDIT.value,
+                status=CheckStatus.PASSED,
+                exit_code=0,
+                stdout="Bandit skipped for test-only targets.",
+                duration_ms=0.0
+            )
+        else:
+            bandit_target = " ".join(non_test_targets) if non_test_targets else "-r /tmp/work -x '*/test_*.py,*/*_test.py'"
+            bandit_cmd = (
+                "if command -v bandit >/dev/null 2>&1; then "
+                f"bandit -q {bandit_target} -s B101,B105,B106,B107; "
+                "else echo 'Bandit not installed'; exit 1; fi"
+            )
+            res_bandit = self.runner.run_tool_check(wt, bandit_cmd, CheckName.BANDIT)
         checks[CheckName.BANDIT.value] = res_bandit
         if fail_fast and res_bandit.status == CheckStatus.FAILED:
             return self._build_report(task_id, checks, total_start)
 
         # Phase 3: Sandboxed Execution & Testing
         # 7. Pytest
-        pytest_cmd = "pytest -v --tb=short -o cache_dir=/tmp/pytest_cache /tmp/work"
+        test_targets = [
+            f"/tmp/work/{Path(t).as_posix()}" for t in (target_files or [])
+            if Path(t).name.startswith("test_") or Path(t).name.endswith("_test.py")
+        ]
+        pytest_target = " ".join(test_targets) if test_targets else "/tmp/work"
+        pytest_cmd = f"pytest -v --tb=short -o cache_dir=/tmp/pytest_cache {pytest_target}"
         res_pytest = self.runner.run_tool_check(wt, pytest_cmd, CheckName.PYTEST)
         checks[CheckName.PYTEST.value] = res_pytest
         if fail_fast and res_pytest.status == CheckStatus.FAILED:
             return self._build_report(task_id, checks, total_start)
 
         # 8. Dependency / Security Checks
-        res_dep = run_dependency_security_check(wt)
+        res_dep = run_dependency_security_check(wt, target_files=target_files)
         checks[CheckName.DEPENDENCY_SECURITY.value] = res_dep
 
         return self._build_report(task_id, checks, total_start)
@@ -98,7 +119,7 @@ class VerificationPipeline:
     def _build_report(
         self,
         task_id: str,
-        checks: Dict[str, CheckResult],
+        checks: dict[str, CheckResult],
         total_start: float
     ) -> VerificationReport:
         total_duration = (time.perf_counter() - total_start) * 1000.0
@@ -178,5 +199,7 @@ class VerificationPipeline:
             checks=checks,
             total_duration_ms=total_duration,
             summary=summary,
-            failure_diagnostics=diagnostics
+            failure_diagnostics=diagnostics,
+            sandbox_config=self.runner.config.to_dict()
         )
+

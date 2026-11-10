@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Test suite for Hydrameda Governance, Risk Assessment, Cryptographic Approval Binding, and Safe Consolidation.
 
@@ -16,12 +15,13 @@ Covers:
 11. LangGraph pre-consolidation interrupt and resumption with approval
 12. LangGraph pre-consolidation rejection halts execution without commit
 """
-import pytest
 import shutil
 import subprocess
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -30,22 +30,21 @@ ENGINE_DIR = REPO_ROOT / "langgraph_engine"
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
 from code_engine import (
-    FileOperation,
-    FileChange,
-    ChangeManifest,
-    PatchEngine,
-    DiffGenerator,
-    RiskLevel,
-    RiskAssessment,
     ApprovalDecision,
-    ConsolidationReport,
+    ChangeManifest,
+    DiffGenerator,
+    FileChange,
+    FileOperation,
     GovernanceEngine,
+    PatchEngine,
+    RiskLevel,
     SafeConsolidator,
 )
 from langgraph_engine import graph
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
 
 @pytest.fixture
@@ -513,6 +512,7 @@ def test_langgraph_consolidation_interrupt_and_resume():
         "user_prompt": "Create an addition function",
         "repo_path": str(Path(__file__).parent.parent),
         "auto_approve": True,  # Spec is auto-approved, but consolidation requires review
+        "trusted_policy": "eval_harness",
         "require_consolidation_approval": True,
         "approval_status": "APPROVED",
         "route": "execute",

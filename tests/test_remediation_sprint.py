@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Hydrameda Security & Reliability Remediation Sprint Test Suite.
 
@@ -13,14 +12,12 @@ Covers:
  8. Benchmark result schema, methodology distinctions, and archiving
 """
 import json
-import os
 import shutil
-import stat
 import subprocess
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -31,25 +28,22 @@ ENGINE_DIR = REPO_ROOT / "langgraph_engine"
 if str(ENGINE_DIR) not in sys.path:
     sys.path.insert(0, str(ENGINE_DIR))
 
+from langgraph.checkpoint.memory import MemorySaver
+
 from code_engine import (
-    FileOperation,
-    FileChange,
+    ApprovalDecision,
     ChangeManifest,
+    FileChange,
+    FileOperation,
+    GovernanceEngine,
     PatchEngine,
     PatchValidator,
     ValidationError,
-    PatchApplicationError,
-    RiskLevel,
-    ApprovalDecision,
-    GovernanceEngine,
-    SafeConsolidator,
 )
-from verification_engine.sandbox_runner import SandboxRunner, SandboxConfig
-from verification_engine.models import CheckStatus
 from evaluate_benchmark import write_reports
 from langgraph_engine import graph
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
+from verification_engine.models import CheckStatus
+from verification_engine.sandbox_runner import SandboxConfig, SandboxRunner
 
 
 @pytest.fixture
@@ -328,7 +322,7 @@ def test_benchmark_result_schema_and_archiving():
 
     try:
         # Run 1: Write reports
-        summary1 = write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
+        write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
 
         assert results_path.exists()
         assert report_md.exists()
@@ -345,7 +339,7 @@ def test_benchmark_result_schema_and_archiving():
         assert data1["summary"]["environment"]["git_commit"] == "abc1234"
 
         # Run 2: Write reports again -> must archive previous run
-        summary2 = write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
+        write_reports(mock_tasks, "all", results_path, report_md, archive_dir, mock_env)
         archived_files = list(archive_dir.glob("benchmark_results_*.json"))
         assert len(archived_files) >= 1, "Previous benchmark run was not archived before writing!"
 

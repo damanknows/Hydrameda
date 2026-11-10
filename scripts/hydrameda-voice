@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Portable Hydrameda Hermes voice & webhook trigger wrapper
+set -euo pipefail
+
+GATEWAY_URL="${HERMES_GATEWAY_URL:-http://127.0.0.1:5679/webhook/hydrameda-trigger}"
+PROMPT="${1:-Create a URL slug generator with unit tests}"
+SENDER="${2:-daman}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+JSON_PAYLOAD=$(cat <<EOF
+{
+  "sender": "$SENDER",
+  "prompt": "$PROMPT",
+  "repo_path": "$REPO_ROOT"
+}
+EOF
+)
+
+curl -s -X POST -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "$GATEWAY_URL"
+echo ""

@@ -7,14 +7,14 @@ injects concise epistemic rules, and routes via Cerebras -> Groq with streaming 
 import json
 import os
 import re
-import time
-import uuid
 from pathlib import Path
+from typing import Any
+
+import uvicorn
 from dotenv import dotenv_values
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from openai import OpenAI
-import uvicorn
 
 HYDRAMEDA_ROOT = Path(os.getenv("HYDRAMEDA_ROOT", Path.home() / "hydrameda"))
 env_vars = {**dotenv_values(HYDRAMEDA_ROOT / ".env"), **os.environ}
@@ -98,7 +98,7 @@ async def chat_completions(request: Request):
     verify_token(auth_header)
 
     body = await request.json()
-    messages = optimize_messages(body.get("messages", []))
+    messages: Any = optimize_messages(body.get("messages", []))
     stream = body.get("stream", False)
     temperature = body.get("temperature", 0.1)
     max_tokens = body.get("max_tokens", 4096)
@@ -123,9 +123,9 @@ async def chat_completions(request: Request):
                 data["model"] = req_model
                 return JSONResponse(content=data)
             else:
-                def event_stream():
-                    completion_stream = client.chat.completions.create(
-                        model=target_model,
+                def event_stream(c=client, m=target_model):
+                    completion_stream = c.chat.completions.create(
+                        model=m,
                         messages=messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
@@ -137,7 +137,7 @@ async def chat_completions(request: Request):
                         yield f"data: {json.dumps(d)}\n\n"
                     yield "data: [DONE]\n\n"
                 return StreamingResponse(event_stream(), media_type="text/event-stream")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - Provider failover catches arbitrary network/upstream errors
             last_err = e
             print(f"⚠️ Provider {name} failed ({e}), failing over...", flush=True)
             continue

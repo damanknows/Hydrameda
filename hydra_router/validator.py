@@ -1,7 +1,8 @@
 """Structured output validation for LLM responses."""
-import re
 import json
-from typing import Any, Callable, Dict, Optional, Type
+import re
+from collections.abc import Callable
+
 from pydantic import BaseModel, ValidationError
 
 from hydra_router.exceptions import StructuredOutputValidationError
@@ -11,7 +12,7 @@ class OutputValidator:
     """Helper methods for validating and parsing structured LLM responses."""
 
     @staticmethod
-    def validate_pydantic(model_class: Type[BaseModel]) -> Callable[[str], BaseModel]:
+    def validate_pydantic(model_class: type[BaseModel]) -> Callable[[str], BaseModel]:
         """Returns a validator function that parses JSON text into a Pydantic model."""
         def _validator(text: str) -> BaseModel:
             # Strip markdown json fences if present
@@ -31,9 +32,9 @@ class OutputValidator:
         return _validator
 
     @staticmethod
-    def validate_xml_files(min_files: int = 1) -> Callable[[str], Dict[str, str]]:
+    def validate_xml_files(min_files: int = 1) -> Callable[[str], dict[str, str]]:
         """Validates that the output contains valid <file name="...">...</file> blocks."""
-        def _validator(text: str) -> Dict[str, str]:
+        def _validator(text: str) -> dict[str, str]:
             pattern = r'<file\s+name=["\']([^"\']+)["\']>\s*(.*?)\s*</file>'
             matches = re.findall(pattern, text, re.DOTALL)
             if len(matches) < min_files:
@@ -56,7 +57,7 @@ class OutputValidator:
         return _validator
 
     @staticmethod
-    def validate_markdown_spec(required_headings: Optional[list[str]] = None) -> Callable[[str], str]:
+    def validate_markdown_spec(required_headings: list[str] | None = None) -> Callable[[str], str]:
         """Validates that the output is non-empty markdown containing required specification headers."""
         reqs = required_headings or ["#"]
 
