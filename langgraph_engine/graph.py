@@ -83,6 +83,22 @@ except ImportError:
     from hydra_router import ModelRole, get_router
     from verification_engine import VerificationPipeline
 
+try:
+    from intent_engine import (
+        ConstraintCompiler,
+        ConstraintValidator,
+        IntentGuard,
+        StructuredIntent,
+    )
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from intent_engine import (
+        ConstraintCompiler,
+        ConstraintValidator,
+        IntentGuard,
+        StructuredIntent,
+    )
+
 # Strip proxy variables that interfere with local endpoints
 for env_var in (
     'OPENAI_BASE_URL', 'OPENAI_API_BASE',
@@ -251,6 +267,7 @@ class HydramedaState(TypedDict, total=False):
     specification_rejection_reason: str
     fidelity_feedback: str
     original_requirements_preserved: bool
+    structured_intent: dict[str, Any]
 
     # Node 5 & 6 outputs: governance & routing
     approval_status: str       # "PENDING" | "APPROVED" | "REJECTED"
@@ -398,6 +415,20 @@ def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
         reqs = extract_task_requirements(prompt, analysis)
         state["task_requirements"] = reqs.to_dict()
 
+        # Autonomous Intent Engine: Compile structured immutable intent ledger
+        intent = ConstraintCompiler.compile(prompt, analysis)
+        state["structured_intent"] = intent.to_dict()
+
+        # Proactively firewall repository files against explicit prohibitions
+        safe_relevant_files, safe_deps = IntentGuard.filter_repository_context(
+            intent=intent,
+            relevant_files=relevant_files,
+            detected_deps=list(detected_deps)
+        )
+        analysis["relevant_files"] = safe_relevant_files
+        analysis["detected_dependencies"] = safe_deps
+        state["task_analysis"] = analysis
+
         log_event(state, node, "SUCCESS", f"Task analyzed ({len(keywords)} keywords, {repo_files_count} repo files, AST map {len(ast_map)} chars)")
     except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Failed to analyze spec: {e}")
@@ -420,6 +451,12 @@ def node_rag_retriever(state: HydramedaState) -> HydramedaState:
         rag = ObsidianRAG()
         query = state.get("user_prompt", "")
         vault_hits = rag.query(query, top_k=3)
+
+        # Active Context Firewall: filter prohibited concepts from vault notes
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            vault_hits = IntentGuard.filter_vault_context(intent, vault_hits)
+
         state["vault_context"] = vault_hits
         log_event(state, node, "SUCCESS", f"Retrieved Obsidian RAG context ({len(vault_hits)} chars)")
     except Exception as e:  # noqa: BLE001 - graceful fallback on vault query failure
@@ -473,9 +510,15 @@ def node_architect(state: HydramedaState) -> HydramedaState:
             repo_ctx_lines.append(f"Detected Dependencies: {analysis.get('detected_dependencies')}")
         repo_context_str = ("\n" + "\n".join(repo_ctx_lines)) if repo_ctx_lines else ""
 
+        intent_directives = ""
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            intent_directives = "\n" + ConstraintCompiler.format_agent_prompt_directives(intent, role="architect") + "\n"
+
         prompt = (
             f"You are Hydrameda's Epistemic Architect.\n"
             f"{feedback_str}"
+            f"{intent_directives}"
             f"User Prompt: {state.get('user_prompt')}\n\n"
             f"Relevant Obsidian Notes:\n{state.get('vault_context')}\n\n"
             f"Codebase AST Map:\n{state.get('ast_skeleton')}\n\n"
@@ -541,6 +584,13 @@ def node_spec_validator(state: HydramedaState) -> HydramedaState:
         vault_context=vault_ctx
     )
 
+    # Double-check with Intent Engine ConstraintValidator
+    if report.passed and state.get("structured_intent"):
+        intent = StructuredIntent.from_dict(state.get("structured_intent"))
+        cv_report = ConstraintValidator(intent).validate_specification(spec, vault_context=vault_ctx)
+        if not cv_report.passed:
+            report = cv_report
+
     if report.passed:
         state["specification_fidelity_status"] = "PASSED"
         state["specification_constraint_violations"] = []
@@ -604,8 +654,14 @@ def node_prompt_optimizer(state: HydramedaState) -> HydramedaState:
         if prohibited:
             prohibitions_rule = "CRITICAL PROHIBITIONS (DO NOT IMPLEMENT):\n" + "\n".join(f"- {p}" for p in prohibited) + "\n"
 
+        intent_directives = ""
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            intent_directives = "\n" + ConstraintCompiler.format_agent_prompt_directives(intent, role="coder") + "\n"
+
         prompt = (
             f"You are Hydrameda's Autonomous Repository Coder.\n"
+            f"{intent_directives}"
             f"Specification:\n{spec}\n\n"
             "CRITICAL RULES FOR REPOSITORY CODE & TESTS:\n"
             "1. Write COMPLETE, FULLY IMPLEMENTED production code. NEVER leave `raise NotImplementedError` or `pass` stubs!\n"
@@ -771,6 +827,13 @@ def node_code_builder(state: HydramedaState) -> HydramedaState:
                 is_test_file=True,
                 module_code_for_test=extracted.get("module.py", "")
             )
+
+        # Validate code artifacts against negative constraints
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            violations = IntentGuard.validate_code_artifacts(intent, extracted)
+            if violations:
+                log_event(state, node, "WARN", f"Generated code contains constraint violations: {'; '.join(violations)}")
 
         # Apply changes safely inside isolated worktree via PatchEngine
         wt_str = state.get("worktree_path", "")
@@ -982,8 +1045,14 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
         if prohibited:
             prohibitions_rule = "CRITICAL PROHIBITIONS (DO NOT INTRODUCE DURING REPAIR):\n" + "\n".join(f"- {p}" for p in prohibited) + "\n"
 
+        intent_directives = ""
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            intent_directives = "\n" + ConstraintCompiler.format_agent_prompt_directives(intent, role="repairer") + "\n"
+
         prompt = (
             f"You are Hydrameda's Autonomous Repair Agent.\n"
+            f"{intent_directives}"
             f"Specification:\n{state.get('spec_md')}\n\n"
             f"REPAIR ATTEMPT {current_repairs}/3:\n"
             f"Error Category: {analysis.get('category', 'UNKNOWN')}\n"
@@ -1018,6 +1087,13 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
                 is_test_file=True,
                 module_code_for_test=merged.get("module.py", "")
             )
+
+        # Validate repaired artifacts against negative constraints
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            violations = IntentGuard.validate_code_artifacts(intent, merged)
+            if violations:
+                log_event(state, node, "WARN", f"Repaired code contains constraint violations: {'; '.join(violations)}")
 
         # Apply repairs safely inside isolated worktree via PatchEngine
         wt_str = state.get("worktree_path", "")

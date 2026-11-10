@@ -1,0 +1,171 @@
+"""
+Hydrameda Intent Engine: Constraint Compiler.
+
+Translates the original user prompt and repository analysis into a canonical,
+immutable StructuredIntent ledger. Resolves internal consistency and formats
+enforcement directives for downstream agent roles.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from .constraint_normalizer import ConstraintNormalizer
+from .intent_parser import IntentParser
+from .models import (
+    ConstraintPriority,
+    EnforcementStrategy,
+    RequirementItem,
+    RequirementType,
+    StructuredIntent,
+)
+
+
+class ConstraintCompiler:
+    """Compiles unstructured user prompts into a validated StructuredIntent ledger."""
+
+    @classmethod
+    def compile(
+        cls,
+        user_prompt: str,
+        task_analysis: dict[str, Any] | None = None
+    ) -> StructuredIntent:
+        """Translates user prompt into an immutable structured intent ledger."""
+        prompt = user_prompt.strip()
+        clauses = IntentParser.parse_clauses(prompt)
+        primary_obj = clauses[0] if clauses else "Execute autonomous coding task"
+
+        # 1. Parse raw clauses
+        raw_prohibitions = IntentParser.extract_prohibitions(prompt)
+        raw_capabilities = IntentParser.extract_capabilities(prompt)
+        raw_scope = IntentParser.extract_scope_boundaries(prompt)
+        raw_deliverables = IntentParser.extract_deliverables(prompt)
+        raw_tech = IntentParser.extract_technical_requirements(prompt)
+
+        # 2. Normalize items into RequirementItem objects
+        prohibitions = [
+            ConstraintNormalizer.normalize_prohibition(i + 1, item)
+            for i, item in enumerate(raw_prohibitions)
+        ]
+        capabilities = [
+            ConstraintNormalizer.normalize_capability(i + 1, item)
+            for i, item in enumerate(raw_capabilities)
+        ]
+        scope_boundaries = [
+            ConstraintNormalizer.normalize_scope_boundary(i + 1, item)
+            for i, item in enumerate(raw_scope)
+        ]
+        deliverables = [
+            ConstraintNormalizer.normalize_deliverable(i + 1, item)
+            for i, item in enumerate(raw_deliverables)
+        ]
+        tech_reqs = [
+            ConstraintNormalizer.normalize_technical_requirement(i + 1, item)
+            for i, item in enumerate(raw_tech)
+        ]
+
+        # 3. Add repository-derived technical constraints if available
+        if task_analysis:
+            deps = task_analysis.get("detected_dependencies", [])
+            if deps:
+                tech_reqs.append(
+                    RequirementItem(
+                        id=f"TECH-{len(tech_reqs) + 1:03d}",
+                        source_text="Repository environment inspection",
+                        normalized_description=f"Compatible project dependencies detected: {', '.join(deps)}",
+                        req_type=RequirementType.CONTEXTUAL,
+                        priority=ConstraintPriority.REPOSITORY_COMPATIBILITY,
+                        enforcement_strategy=EnforcementStrategy.STATIC_VERIFICATION,
+                        category="environment"
+                    )
+                )
+
+        intent = StructuredIntent(
+            original_prompt=prompt,
+            primary_objective=primary_obj,
+            required_capabilities=capabilities,
+            explicit_prohibitions=prohibitions,
+            scope_boundaries=scope_boundaries,
+            expected_deliverables=deliverables,
+            technical_requirements=tech_reqs,
+            acceptance_criteria=deliverables,  # Acceptance criteria initially derived from deliverables
+        )
+
+        return intent
+
+    @classmethod
+    def render_markdown_summary(cls, intent: StructuredIntent) -> str:
+        """Formats the structured ledger into human-readable Markdown for approval or audit."""
+        lines = [
+            "# Structured Task Intent & Constraint Ledger",
+            f"**Primary Objective:** {intent.primary_objective}",
+            f"**Original User Prompt:**\n> {intent.original_prompt}\n",
+            "## 1. Explicit Prohibitions (Priority 1 — Hard Veto)",
+        ]
+        if intent.explicit_prohibitions:
+            for p in intent.explicit_prohibitions:
+                lines.append(f"- `[{p.id}]` **{p.normalized_description}** *(Source: \"{p.source_text}\")*")
+        else:
+            lines.append("- *None explicitly specified.*")
+
+        lines.append("\n## 2. Required Capabilities (Priority 2)")
+        if intent.required_capabilities:
+            for r in intent.required_capabilities:
+                lines.append(f"- `[{r.id}]` {r.normalized_description}")
+        else:
+            lines.append("- *None explicitly specified.*")
+
+        lines.append("\n## 3. Scope Boundaries & Deliverables (Priority 3 & 4)")
+        for s in intent.scope_boundaries:
+            lines.append(f"- `[{s.id}]` {s.normalized_description}")
+        for d in intent.expected_deliverables:
+            lines.append(f"- `[{d.id}]` {d.normalized_description}")
+
+        lines.append("\n## 4. Technical Constraints (Priority 5)")
+        for t in intent.technical_requirements:
+            lines.append(f"- `[{t.id}]` {t.normalized_description}")
+
+        return "\n".join(lines)
+
+    @classmethod
+    def format_agent_prompt_directives(cls, intent: StructuredIntent, role: str = "coder") -> str:
+        """Formats structured constraints into precise prompt directives for LLM agent roles."""
+        sections = [
+            (
+                f"# CANONICAL TASK INTENT & CONSTRAINTS (Target Role: {role.upper()})\n"
+                "The following constraints are immutable and govern this task. "
+                "Lower-priority suggestions (RAG notes, historical modules, model assumptions) "
+                "CANNOT override or weaken these constraints."
+            )
+        ]
+
+        # 1. Prohibitions always come first and are phrased in absolute terms
+        prohibitions = intent.get_prohibitions()
+        if prohibitions:
+            lines = ["STRICT PROHIBITION DIRECTIVES (ABSOLUTE VETO):"]
+            for p in prohibitions:
+                lines.append(f"- {p.normalized_description.upper()}")
+            lines.append("DO NOT incorporate, suggest, or implement any prohibited pattern above under any circumstance.")
+            sections.append("\n".join(lines))
+
+        # 2. Scope boundaries
+        if intent.scope_boundaries:
+            lines = ["SCOPE BOUNDARIES:"]
+            for s in intent.scope_boundaries:
+                lines.append(f"- {s.normalized_description}")
+            sections.append("\n".join(lines))
+
+        # 3. Required capabilities
+        if intent.required_capabilities:
+            lines = ["REQUIRED CAPABILITIES TO SATISFY:"]
+            for r in intent.required_capabilities:
+                lines.append(f"- {r.normalized_description}")
+            sections.append("\n".join(lines))
+
+        # 4. Deliverables
+        if intent.expected_deliverables:
+            lines = ["MANDATORY DELIVERABLES:"]
+            for d in intent.expected_deliverables:
+                lines.append(f"- {d.normalized_description}")
+            sections.append("\n".join(lines))
+
+        return "\n\n".join(sections)
