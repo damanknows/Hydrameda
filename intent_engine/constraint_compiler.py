@@ -128,13 +128,19 @@ class ConstraintCompiler:
 
     @classmethod
     def format_agent_prompt_directives(cls, intent: StructuredIntent, role: str = "coder") -> str:
-        """Formats structured constraints into precise prompt directives for LLM agent roles."""
+        """Formats canonical structured constraints into precise prompt directives for LLM agent roles."""
+        role_normalized = role.lower().strip()
         sections = [
             (
                 f"# CANONICAL TASK INTENT & CONSTRAINTS (Target Role: {role.upper()})\n"
                 "The following constraints are immutable and govern this task. "
                 "Lower-priority suggestions (RAG notes, historical modules, model assumptions) "
                 "CANNOT override or weaken these constraints."
+            ),
+            (
+                f"ORIGINAL TASK OBJECTIVE:\n"
+                f"{intent.primary_objective or intent.original_prompt}\n"
+                f"Canonical Prompt: \"{intent.original_prompt}\""
             )
         ]
 
@@ -147,25 +153,62 @@ class ConstraintCompiler:
             lines.append("DO NOT incorporate, suggest, or implement any prohibited pattern above under any circumstance.")
             sections.append("\n".join(lines))
 
-        # 2. Scope boundaries
-        if intent.scope_boundaries:
-            lines = ["SCOPE BOUNDARIES:"]
-            for s in intent.scope_boundaries:
-                lines.append(f"- {s.normalized_description}")
-            sections.append("\n".join(lines))
-
-        # 3. Required capabilities
+        # 2. Required functionality
         if intent.required_capabilities:
-            lines = ["REQUIRED CAPABILITIES TO SATISFY:"]
+            lines = ["REQUIRED FUNCTIONALITY TO SATISFY:"]
             for r in intent.required_capabilities:
                 lines.append(f"- {r.normalized_description}")
             sections.append("\n".join(lines))
 
-        # 4. Deliverables
+        # 3. Mandatory deliverables
         if intent.expected_deliverables:
             lines = ["MANDATORY DELIVERABLES:"]
             for d in intent.expected_deliverables:
                 lines.append(f"- {d.normalized_description}")
             sections.append("\n".join(lines))
+
+        # 4. Scope boundaries
+        lines = ["SCOPE BOUNDARIES (DO NOT EXCEED):"]
+        if intent.scope_boundaries:
+            for s in intent.scope_boundaries:
+                lines.append(f"- {s.normalized_description}")
+        else:
+            lines.append("- Confine all changes strictly to requested deliverables and target modules.")
+        sections.append("\n".join(lines))
+
+        # 5. Relevant acceptance criteria
+        criteria = intent.acceptance_criteria or intent.technical_requirements
+        if criteria:
+            lines = ["RELEVANT ACCEPTANCE CRITERIA:"]
+            for c in criteria:
+                lines.append(f"- {c.normalized_description}")
+            sections.append("\n".join(lines))
+
+        # Role-specific invariants
+        if "prompt_optimizer" in role_normalized or "optimizer" in role_normalized:
+            sections.append(
+                "ROLE DIRECTIVE FOR PROMPT OPTIMIZER:\n"
+                "- You must NEVER remove, weaken, or omit explicit prohibitions, scope boundaries, or acceptance criteria.\n"
+                "- Preserve all negative constraints and required deliverables in the emitted coder prompt."
+            )
+        elif "repair" in role_normalized:
+            sections.append(
+                "ROLE DIRECTIVE FOR REPAIR AGENT:\n"
+                "- Fix specific verification failures WITHOUT introducing prohibited features.\n"
+                "- NEVER create fake dependency packages or unrelated stubs to make checks pass.\n"
+                "- Preserve all working functionality while addressing reported diagnostics."
+            )
+        elif "analyzer" in role_normalized or "remediation" in role_normalized:
+            sections.append(
+                "ROLE DIRECTIVE FOR STATIC ANALYSIS REMEDIATION:\n"
+                "- Provide actionable guidance compliant with canonical task constraints.\n"
+                "- Do NOT advise creating fake stubs or third-party wrappers."
+            )
+        elif "consolidat" in role_normalized:
+            sections.append(
+                "ROLE DIRECTIVE FOR CONSOLIDATION AGENT:\n"
+                "- Verify that the final changeset remains strictly within approved task scope.\n"
+                "- Block changes that introduce unrequested files or violate explicit prohibitions."
+            )
 
         return "\n\n".join(sections)

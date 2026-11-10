@@ -64,7 +64,10 @@ try:
         SafeConsolidator,
     )
     from hydra_router import ModelRole, get_router
-    from verification_engine import VerificationPipeline
+    from verification_engine import (
+        SemanticComplianceVerifier,
+        VerificationPipeline,
+    )
 except ImportError:
     # Handle sys.path when running graph.py standalone
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -81,7 +84,10 @@ except ImportError:
         SafeConsolidator,
     )
     from hydra_router import ModelRole, get_router
-    from verification_engine import VerificationPipeline
+    from verification_engine import (
+        SemanticComplianceVerifier,
+        VerificationPipeline,
+    )
 
 try:
     from intent_engine import (
@@ -311,6 +317,10 @@ class HydramedaState(TypedDict, total=False):
     pytest_stderr: str
     verifier_exit_code: int
     verification_report: dict[str, Any]
+    technical_verification_status: str       # "PASSED" | "FAILED" | "PENDING"
+    semantic_compliance_status: str          # "PASSED" | "FAILED" | "WARNING" | "NOT_EVALUATED"
+    semantic_compliance_report: dict[str, Any]
+    overall_task_status: str                 # "PASSED" | "FAILED" | "REJECTED" | "ERROR"
 
     # Neuro-symbolic repair loop tracking (Max 3 repairs)
     repair_count: int
@@ -777,9 +787,17 @@ def node_prompt_optimizer(state: HydramedaState) -> HydramedaState:
             prohibitions_rule = "CRITICAL PROHIBITIONS (DO NOT IMPLEMENT):\n" + "\n".join(f"- {p}" for p in prohibited) + "\n"
 
         intent_directives = ""
+        intent = None
         if state.get("structured_intent"):
             intent = StructuredIntent.from_dict(state.get("structured_intent"))
-            intent_directives = "\n" + ConstraintCompiler.format_agent_prompt_directives(intent, role="coder") + "\n"
+        elif state.get("user_prompt"):
+            intent = ConstraintCompiler.compile(state["user_prompt"])
+            state["structured_intent"] = intent.to_dict()
+
+        if intent:
+            optimizer_directives = ConstraintCompiler.format_agent_prompt_directives(intent, role="prompt_optimizer")
+            coder_directives = ConstraintCompiler.format_agent_prompt_directives(intent, role="coder")
+            intent_directives = f"\n{optimizer_directives}\n\n{coder_directives}\n"
 
         prompt = (
             f"You are Hydrameda's Autonomous Repository Coder.\n"
@@ -982,6 +1000,17 @@ def node_code_builder(state: HydramedaState) -> HydramedaState:
         if not extracted:
             raise ValueError(f"Could not parse <file> tags from Builder Output. Raw snippet: {raw_content[:200]}")
 
+        # Invariant: Never create fake dependency packages or unrelated stubs to make checks pass
+        prohibited_stubs = ("litellm.py", "langgraph", "tree_sitter_language_pack", "pydantic", "pytest.py")
+        detected_stubs = [
+            f for f in extracted
+            if any(f == stub or f.startswith(f"{stub}/") or f.endswith(f"/{stub}") for stub in prohibited_stubs)
+        ]
+        if detected_stubs:
+            for s in detected_stubs:
+                extracted.pop(s, None)
+            log_event(state, node, "WARN", f"Stripped prohibited fake dependency stub(s) from builder output: {detected_stubs}")
+
         # Deterministic AST import healing
         if "module.py" in extracted:
             extracted["module.py"] = heal_module_imports(extracted["module.py"], is_test_file=False)
@@ -1068,64 +1097,100 @@ def node_sandbox_verifier(state: HydramedaState) -> HydramedaState:
     attempt_label = f"Attempt {state.get('repair_count', 0) + 1}/4"
     log_event(state, node, "INFO", f"Running independent deterministic verification ({attempt_label})...")
 
+    tech_status = "FAILED"
     # Support mock verifier hook for deterministic unit tests
     if _VERIFIER_HANDLER is not None:
         exit_code, output = _VERIFIER_HANDLER(state)
+        tech_status = "PASSED" if exit_code == 0 else "FAILED"
         state["verifier_exit_code"] = exit_code
         state["verifier_output"] = output
+        state["technical_verification_status"] = tech_status
         if exit_code == 0:
             state["pytest_stderr"] = ""
-            state["status"] = "PASSED"
             state["verification_report"] = {
                 "overall_status": "passed",
                 "summary": output,
                 "checks": {}
             }
-            log_event(state, node, "SUCCESS", "Verification PASSED with 0 errors!")
         else:
             state["pytest_stderr"] = "\n".join(output.splitlines()[-60:])
-            state["status"] = "FAILED"
             state["verification_report"] = {
                 "overall_status": "failed",
                 "summary": output,
                 "failure_diagnostics": {"diagnostic": state["pytest_stderr"], "category": "ASSERTION_FAILURE"}
             }
-            log_event(state, node, "WARN", f"Verification FAILED (Exit code {exit_code})")
-        return state
+    else:
+        wt = Path(state.get("worktree_path", "")).resolve()
+        if not wt.exists():
+            state["technical_verification_status"] = "FAILED"
+            state["semantic_compliance_status"] = "FAILED"
+            state["status"] = "FAILED"
+            state["overall_task_status"] = "FAILED"
+            state["verifier_exit_code"] = 1
+            state["pytest_stderr"] = f"Worktree path does not exist: {wt}"
+            state["verification_report"] = {
+                "overall_status": "failed",
+                "summary": f"Worktree path does not exist: {wt}",
+                "checks": {}
+            }
+            return state
 
-    wt = Path(state.get("worktree_path", "")).resolve()
-    if not wt.exists():
-        state["status"] = "FAILED"
-        state["verifier_exit_code"] = 1
-        state["pytest_stderr"] = f"Worktree path does not exist: {wt}"
-        state["verification_report"] = {
-            "overall_status": "failed",
-            "summary": f"Worktree path does not exist: {wt}",
-            "checks": {}
-        }
-        return state
+        pipeline = VerificationPipeline()
+        report = pipeline.run_all_checks(
+            worktree_path=wt,
+            task_id=state.get("task_id", "task-verify"),
+            target_files=state.get("target_files")
+        )
 
-    pipeline = VerificationPipeline()
-    report = pipeline.run_all_checks(
-        worktree_path=wt,
-        task_id=state.get("task_id", "task-verify"),
-        target_files=state.get("target_files")
+        state["verification_report"] = report.to_dict()
+        state["verifier_output"] = report.summary
+        state["verifier_exit_code"] = 0 if report.is_passed() else 1
+        tech_status = "PASSED" if report.is_passed() else "FAILED"
+        state["technical_verification_status"] = tech_status
+
+        if report.is_passed():
+            state["pytest_stderr"] = ""
+        else:
+            diag = report.failure_diagnostics.get("diagnostic", "Verification check failed")
+            state["pytest_stderr"] = diag
+            state["error_analysis"] = report.failure_diagnostics
+
+    # Phase 7: Semantic Task-Compliance Verification Layer
+    intent = StructuredIntent.from_dict(state.get("structured_intent")) if state.get("structured_intent") else None
+    compliance_report = SemanticComplianceVerifier.verify_semantic_compliance(
+        user_prompt=state.get("user_prompt", ""),
+        intent=intent,
+        spec_md=state.get("spec_md", ""),
+        current_files=state.get("current_files"),
+        manifest=state.get("manifest"),
+        worktree_path=state.get("worktree_path"),
     )
+    state["semantic_compliance_report"] = compliance_report.to_dict()
+    state["semantic_compliance_status"] = compliance_report.status.value
 
-    state["verification_report"] = report.to_dict()
-    state["verifier_output"] = report.summary
-    state["verifier_exit_code"] = 0 if report.is_passed() else 1
-
-    if report.is_passed():
-        state["pytest_stderr"] = ""
+    # Synthesize overall status:
+    # Strict Invariant: Technical success must never automatically imply overall success!
+    # A task cannot be marked fully successful when technical checks pass but semantic task compliance fails.
+    if tech_status == "PASSED" and compliance_report.passed:
         state["status"] = "PASSED"
-        log_event(state, node, "SUCCESS", "All 8 independent verification checks PASSED!")
+        state["overall_task_status"] = "PASSED"
+        log_event(state, node, "SUCCESS", "All 8 independent verification checks PASSED and semantic task compliance VERIFIED!")
+    elif tech_status == "PASSED" and not compliance_report.passed:
+        state["status"] = "FAILED"
+        state["overall_task_status"] = "FAILED"
+        state["pytest_stderr"] = f"Semantic task compliance failed: {compliance_report.summary}"
+        state["error_analysis"] = {
+            "category": "SEMANTIC_COMPLIANCE_FAILURE",
+            "summary": compliance_report.summary,
+            "diagnostic": compliance_report.summary,
+            "failed_check": "semantic_compliance"
+        }
+        log_event(state, node, "ERROR", f"Technical verification passed, but SEMANTIC TASK COMPLIANCE FAILED: {compliance_report.summary}")
     else:
         state["status"] = "FAILED"
-        diag = report.failure_diagnostics.get("diagnostic", "Verification check failed")
-        state["pytest_stderr"] = diag
-        state["error_analysis"] = report.failure_diagnostics
-        log_event(state, node, "WARN", f"Verification FAILED on check: {report.failure_diagnostics.get('failed_check')}")
+        state["overall_task_status"] = "FAILED"
+        failed_chk = (state.get("error_analysis") or {}).get("failed_check", "verifier")
+        log_event(state, node, "WARN", f"Technical verification FAILED on check: {failed_chk}")
 
     return state
 
@@ -1239,6 +1304,17 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
         if not extracted:
             raise ValueError(f"Could not parse repaired <file> tags from Repair Agent. Snippet: {raw_content[:200]}")
 
+        # Invariant: Never create fake dependency packages or unrelated stubs to make checks pass
+        prohibited_stubs = ("litellm.py", "langgraph", "tree_sitter_language_pack", "pydantic", "pytest.py")
+        detected_stubs = [
+            f for f in extracted
+            if any(f == stub or f.startswith(f"{stub}/") or f.endswith(f"/{stub}") for stub in prohibited_stubs)
+        ]
+        if detected_stubs:
+            for s in detected_stubs:
+                extracted.pop(s, None)
+            log_event(state, node, "WARN", f"Stripped prohibited fake dependency stub(s) from repair output: {detected_stubs}")
+
         # Merge with existing files
         merged = dict(prev_files)
         merged.update(extracted)
@@ -1351,7 +1427,9 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         state["manifest"] = manifest.to_dict()
         state["manifest_hash"] = manifest.manifest_hash
 
-    is_verified = (state.get("status") == "PASSED" and state.get("verifier_exit_code") == 0)
+    tech_passed = (state.get("technical_verification_status") == "PASSED" or (state.get("status") == "PASSED" and state.get("verifier_exit_code") == 0))
+    semantic_passed = (state.get("semantic_compliance_status") in ("PASSED", "WARNING", None))
+    is_verified = bool(tech_passed and semantic_passed and state.get("status") == "PASSED")
 
     if manifest and is_verified:
         risk = GovernanceEngine.assess_risk(manifest, verification_passed=True)
@@ -1447,14 +1525,15 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
 
         state["approval_decision"] = decision.to_dict()
 
-        # Execute safe consolidation
+        intent = StructuredIntent.from_dict(state.get("structured_intent")) if state.get("structured_intent") else None
         consolidation_report = SafeConsolidator.consolidate_changes(
             worktree_path=wt or main_repo,
             main_repo_path=main_repo,
             manifest=manifest,
             decision=decision,
             verification_passed=is_verified,
-            author="Hydrameda Agent"
+            author="Hydrameda Agent",
+            intent=intent,
         )
         state["consolidation_report"] = consolidation_report.to_dict()
         state["diff"] = consolidation_report.final_diff or ""
@@ -1523,6 +1602,9 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         "task_id": state.get("task_id", ""),
         "task_state": state.get("task_state", TaskState.FAILED.value),
         "status": state.get("status", "UNKNOWN"),
+        "overall_task_status": state.get("overall_task_status", state.get("status", "UNKNOWN")),
+        "technical_verification_status": state.get("technical_verification_status", "UNKNOWN"),
+        "semantic_compliance_status": state.get("semantic_compliance_status", "NOT_EVALUATED"),
         "specification_fidelity_status": state.get("specification_fidelity_status", "NOT_EVALUATED"),
         "specification_validation_attempts": state.get("spec_validation_attempts", 0),
         "specification_constraint_violations": state.get("specification_constraint_violations", []),

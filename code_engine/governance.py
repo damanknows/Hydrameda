@@ -118,6 +118,7 @@ class ConsolidationReport:
     risk_level: str | None = None
     files_affected: list[str] = field(default_factory=list)
     summary: str = ""
+    rejection_reasons: list[str] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -435,9 +436,10 @@ class GovernanceEngine:
         cls,
         decision: ApprovalDecision | None,
         manifest: ChangeManifest,
-        verification_passed: bool = True
+        verification_passed: bool = True,
+        intent: Any = None,
     ) -> tuple[bool, list[str]]:
-        """Cryptographically validates the approval decision against the exact manifest hash and security constraints."""
+        """Cryptographically validates the approval decision against the exact manifest hash, security constraints, and task scope."""
         reasons: list[str] = []
 
         if decision is None:
@@ -478,6 +480,30 @@ class GovernanceEngine:
                 f"({', '.join(manifest.deleted_files)}), but destructive_approved is False."
             )
 
+        # Scope and Prohibition Check on Changeset (Phase 6 Invariant)
+        prohibited_stub_names = ("litellm.py", "langgraph", "tree_sitter_language_pack", "pydantic", "pytest.py")
+        for ch in manifest.changes:
+            fname = ch.file_path.lower()
+            if any(fname == p or fname.startswith(f"{p}/") for p in prohibited_stub_names):
+                reasons.append(
+                    f"PROHIBITED STUB PACKAGE IN CHANGESET: File '{ch.file_path}' attempts to create a prohibited stub package."
+                )
+            if any(p in fname for p in (".env", "id_rsa", "credentials", "docker-compose.yml")):
+                reasons.append(
+                    f"UNAUTHORIZED SENSITIVE FILE MODIFICATION: Changeset modifies sensitive file '{ch.file_path}' outside task scope."
+                )
+
+        if intent and hasattr(intent, "get_prohibitions"):
+            for p in intent.get_prohibitions():
+                p_norm = p.normalized_description.lower()
+                if "jwt" in p_norm:
+                    for ch in manifest.changes:
+                        content_lower = (ch.proposed_content or "").lower()
+                        if "validate_jwt" in content_lower or "jwterror" in content_lower:
+                            reasons.append(
+                                f"PROHIBITED FEATURE IN CHANGESET: File '{ch.file_path}' introduces prohibited JWT functionality."
+                            )
+
         if reasons:
             return False, reasons
         return True, ["Approval cryptographically verified and valid."]
@@ -494,14 +520,15 @@ class SafeConsolidator:
         manifest: ChangeManifest,
         decision: ApprovalDecision,
         verification_passed: bool = True,
-        author: str = "Hydrameda Agent"
+        author: str = "Hydrameda Agent",
+        intent: Any = None,
     ) -> ConsolidationReport:
-        """Consolidates changes after cryptographically validating the approval decision."""
+        """Consolidates changes after cryptographically validating the approval decision and task scope."""
         wt = Path(worktree_path).resolve()
         main_repo = Path(main_repo_path).resolve()
 
-        # Step 1: Validate Approval
-        valid, val_reasons = GovernanceEngine.validate_approval(decision, manifest, verification_passed)
+        # Step 1: Validate Approval & Task Scope
+        valid, val_reasons = GovernanceEngine.validate_approval(decision, manifest, verification_passed, intent=intent)
         risk = GovernanceEngine.assess_risk(manifest, verification_passed)
 
         # Ensure diff is generated
@@ -517,6 +544,10 @@ class SafeConsolidator:
                 status = "REPLAY_REJECTED"
             elif any("DESTRUCTIVE OPERATIONS UNAPPROVED" in r for r in val_reasons):
                 status = "DESTRUCTIVE_UNAPPROVED"
+            elif any("PROHIBITED" in r for r in val_reasons):
+                status = "PROHIBITION_VIOLATION_REJECTED"
+            elif any("UNAUTHORIZED" in r or "SCOPE" in r for r in val_reasons):
+                status = "SCOPE_VIOLATION_REJECTED"
             elif not verification_passed:
                 status = "VERIFICATION_FAILED"
 
@@ -543,6 +574,7 @@ class SafeConsolidator:
                 manifest_hash=manifest.manifest_hash,
                 risk_level=risk.level.value,
                 files_affected=manifest.target_files,
+                rejection_reasons=val_reasons,
                 summary=f"Consolidation halted: {'; '.join(val_reasons)}"
             )
 

@@ -144,6 +144,16 @@ class IntentParser:
                 "category": "architecture"
             })
 
+        scope_match = re.search(r"scope\s*(?:limited to|restricted to|:)?\s*([^.;\n]+)", prompt, re.IGNORECASE)
+        if scope_match:
+            val = scope_match.group(1).strip()
+            if val and not any(b["boundary"].endswith(val) for b in boundaries):
+                boundaries.append({
+                    "source_text": scope_match.group(0),
+                    "boundary": f"Scope restricted to: {val}",
+                    "category": "scope"
+                })
+
         return boundaries
 
     @classmethod
