@@ -39,7 +39,7 @@ def test_add():
 
     def _mock(model_group: str, prompt: str) -> tuple[str, str]:
         if "architect" in model_group:
-            spec = spec_override or "# Spec: Mathematical Addition Utility\nDefine add(a: int, b: int) -> int."
+            spec = spec_override or "# Spec: Mathematical Addition Utility\nDefine add(a: int, b: int) -> int.\n\n### Tests\nDefine test_add() using pytest."
             return spec, "mock-architect"
         return (code_override or default_code), "mock-coder"
 

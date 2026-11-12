@@ -64,7 +64,10 @@ try:
         SafeConsolidator,
     )
     from hydra_router import ModelRole, get_router
-    from verification_engine import VerificationPipeline
+    from verification_engine import (
+        SemanticComplianceVerifier,
+        VerificationPipeline,
+    )
 except ImportError:
     # Handle sys.path when running graph.py standalone
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -81,7 +84,50 @@ except ImportError:
         SafeConsolidator,
     )
     from hydra_router import ModelRole, get_router
-    from verification_engine import VerificationPipeline
+    from verification_engine import (
+        SemanticComplianceVerifier,
+        VerificationPipeline,
+    )
+
+try:
+    from intent_engine import (
+        ConstraintCompiler,
+        IntentGuard,
+        StructuredIntent,
+    )
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from intent_engine import (
+        ConstraintCompiler,
+        IntentGuard,
+        StructuredIntent,
+    )
+
+try:
+    from experience_engine import (
+        ContextFirewall,
+        ExperienceExtractor,
+        ExperienceRetriever,
+        KnowledgeRecord,
+        KnowledgeStore,
+        LearningPolicy,
+        RetrievedExperienceContext,
+        SkillExtractor,
+    )
+    from specification_auditor import AuditEngine
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from experience_engine import (
+        ContextFirewall,
+        ExperienceExtractor,
+        ExperienceRetriever,
+        KnowledgeRecord,
+        KnowledgeStore,
+        LearningPolicy,
+        RetrievedExperienceContext,
+        SkillExtractor,
+    )
+    from specification_auditor import AuditEngine
 
 # Strip proxy variables that interfere with local endpoints
 for env_var in (
@@ -251,6 +297,11 @@ class HydramedaState(TypedDict, total=False):
     specification_rejection_reason: str
     fidelity_feedback: str
     original_requirements_preserved: bool
+    structured_intent: dict[str, Any]
+    retrieved_skills: list[dict[str, Any]]
+    retrieved_lessons: list[dict[str, Any]]
+    specification_audit_report: dict[str, Any]
+    specification_audit_outcome: str
 
     # Node 5 & 6 outputs: governance & routing
     approval_status: str       # "PENDING" | "APPROVED" | "REJECTED"
@@ -268,6 +319,10 @@ class HydramedaState(TypedDict, total=False):
     pytest_stderr: str
     verifier_exit_code: int
     verification_report: dict[str, Any]
+    technical_verification_status: str       # "PASSED" | "FAILED" | "PENDING"
+    semantic_compliance_status: str          # "PASSED" | "FAILED" | "WARNING" | "NOT_EVALUATED"
+    semantic_compliance_report: dict[str, Any]
+    overall_task_status: str                 # "PASSED" | "FAILED" | "REJECTED" | "ERROR"
 
     # Neuro-symbolic repair loop tracking (Max 3 repairs)
     repair_count: int
@@ -299,6 +354,9 @@ class HydramedaState(TypedDict, total=False):
     consolidation_report: dict[str, Any]
     start_time: float
     end_time: float
+    extracted_skills: list[dict[str, Any]]
+    extracted_lessons: list[dict[str, Any]]
+    experience_extraction_status: str        # "COMPLETED" | "SKIPPED" | "FAILED"
 
 
 
@@ -319,8 +377,59 @@ def log_event(state: HydramedaState, node: str, level: str, message: str, metada
 
 
 # ============================================================================
-# 12 Node Definitions
+# Node Definitions
 # ============================================================================
+
+def node_intent_compiler(state: HydramedaState) -> HydramedaState:
+    """Node 0: Canonical Intent Compiler.
+
+    Compiles unstructured user prompts into an immutable StructuredIntent ledger,
+    extracting explicit prohibitions, required capabilities, deliverables, and scope boundaries.
+
+    Inputs:  user_prompt, task_id
+    Outputs: structured_intent, task_requirements, task_state
+    """
+    node = "intent_compiler"
+    state["task_state"] = TaskState.ANALYZING.value
+    if not state.get("start_time"):
+        state["start_time"] = time.time()
+
+    prompt = state.get("user_prompt", "").strip()
+    log_event(state, node, "INFO", f"Compiling canonical task intent for '{state.get('task_id')}'...")
+
+    try:
+        if not prompt:
+            raise ValueError("user_prompt cannot be empty")
+
+        intent = ConstraintCompiler.compile(prompt)
+        state["structured_intent"] = intent.to_dict()
+
+        prohibitions = [p.normalized_description for p in intent.get_prohibitions()]
+        capabilities = [c.normalized_description for c in intent.get_positive_requirements()]
+        reqs = TaskRequirements(
+            required_capabilities=capabilities,
+            prohibited_capabilities=prohibitions,
+            scope_boundaries=[s.normalized_description for s in intent.scope_boundaries],
+            technical_constraints=[t.normalized_description for t in intent.technical_requirements],
+            requested_deliverables=[d.normalized_description for d in intent.expected_deliverables],
+        )
+        state["task_requirements"] = reqs.to_dict()
+
+        log_event(
+            state,
+            node,
+            "SUCCESS",
+            f"Canonical intent compiled ({len(intent.explicit_prohibitions)} prohibitions, "
+            f"{len(intent.required_capabilities)} capabilities, {len(intent.scope_boundaries)} scope boundaries)"
+        )
+    except Exception as e:  # noqa: BLE001
+        log_event(state, node, "ERROR", f"Intent compiler failure: {e}")
+        state["error"] = str(e)
+        state["status"] = "ERROR"
+        state["task_state"] = TaskState.FAILED.value
+
+    return state
+
 
 def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
     """Node 1: Analyzes user prompt intent and extracts repository AST skeleton.
@@ -398,6 +507,20 @@ def node_spec_analyzer(state: HydramedaState) -> HydramedaState:
         reqs = extract_task_requirements(prompt, analysis)
         state["task_requirements"] = reqs.to_dict()
 
+        # Autonomous Intent Engine: Compile structured immutable intent ledger
+        intent = ConstraintCompiler.compile(prompt, analysis)
+        state["structured_intent"] = intent.to_dict()
+
+        # Proactively firewall repository files against explicit prohibitions
+        safe_relevant_files, safe_deps = IntentGuard.filter_repository_context(
+            intent=intent,
+            relevant_files=relevant_files,
+            detected_deps=list(detected_deps)
+        )
+        analysis["relevant_files"] = safe_relevant_files
+        analysis["detected_dependencies"] = safe_deps
+        state["task_analysis"] = analysis
+
         log_event(state, node, "SUCCESS", f"Task analyzed ({len(keywords)} keywords, {repo_files_count} repo files, AST map {len(ast_map)} chars)")
     except Exception as e:  # noqa: BLE001 - Node boundary catches unexpected execution errors to ensure robust failure handling
         log_event(state, node, "ERROR", f"Failed to analyze spec: {e}")
@@ -420,11 +543,44 @@ def node_rag_retriever(state: HydramedaState) -> HydramedaState:
         rag = ObsidianRAG()
         query = state.get("user_prompt", "")
         vault_hits = rag.query(query, top_k=3)
+
+        # Active Context Firewall: filter prohibited concepts from vault notes
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            vault_hits = IntentGuard.filter_vault_context(intent, vault_hits)
+
         state["vault_context"] = vault_hits
         log_event(state, node, "SUCCESS", f"Retrieved Obsidian RAG context ({len(vault_hits)} chars)")
+
+        # Structured Experience & Skill Retrieval
+        intent_obj: StructuredIntent | None = None
+        if state.get("structured_intent"):
+            intent_obj = StructuredIntent.from_dict(state.get("structured_intent"))
+        elif state.get("user_prompt"):
+            intent_obj = ConstraintCompiler.compile(state["user_prompt"])
+            state["structured_intent"] = intent_obj.to_dict()
+
+        if intent_obj:
+            analysis = state.get("task_analysis", {})
+            keywords = analysis.get("keywords", []) or re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", query)
+            retriever = ExperienceRetriever()
+            exp_ctx = retriever.retrieve(intent=intent_obj, task_keywords=keywords)
+            state["retrieved_skills"] = [s.to_dict() for s in exp_ctx.skills]
+            state["retrieved_lessons"] = [l.to_dict() for l in exp_ctx.lessons]
+            log_event(
+                state,
+                node,
+                "SUCCESS",
+                f"Retrieved experience context ({len(exp_ctx.skills)} skills, {len(exp_ctx.lessons)} lessons, {len(exp_ctx.rejected_items)} rejected)"
+            )
+        else:
+            state["retrieved_skills"] = []
+            state["retrieved_lessons"] = []
     except Exception as e:  # noqa: BLE001 - graceful fallback on vault query failure
         log_event(state, node, "WARN", f"Obsidian RAG retrieval warning (using empty context): {e}")
         state["vault_context"] = ""
+        state["retrieved_skills"] = []
+        state["retrieved_lessons"] = []
     return state
 
 
@@ -473,21 +629,49 @@ def node_architect(state: HydramedaState) -> HydramedaState:
             repo_ctx_lines.append(f"Detected Dependencies: {analysis.get('detected_dependencies')}")
         repo_context_str = ("\n" + "\n".join(repo_ctx_lines)) if repo_ctx_lines else ""
 
-        prompt = (
-            f"You are Hydrameda's Epistemic Architect.\n"
-            f"{feedback_str}"
-            f"User Prompt: {state.get('user_prompt')}\n\n"
-            f"Relevant Obsidian Notes:\n{state.get('vault_context')}\n\n"
-            f"Codebase AST Map:\n{state.get('ast_skeleton')}\n\n"
-            f"Repository Context:{repo_context_str}\n\n"
-            "Write a concise technical specification (in Markdown) defining required functions/classes and unit tests.\n"
-            "STRICT DESIGN CONSTRAINTS:\n"
-            "0. PRIMARY DIRECTIVE: Strictly satisfy the User Prompt. Background notes and vault context are reference material ONLY; do NOT substitute, expand, or alter the user's requested scope, protocol, or design based on background notes.\n"
-            f"{prohibitions_str}"
-            f"{lib_constraint}"
-            "2. Raise ONLY built-in `ValueError` or `TypeError` (or custom exceptions that subclass `ValueError`).\n"
-            "3. Do NOT write `raise NotImplementedError` stubs in your specification."
-        )
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            intent_directives = "\n" + ConstraintCompiler.format_agent_prompt_directives(intent, role="architect") + "\n"
+            skills = [KnowledgeRecord.from_dict(s) for s in state.get("retrieved_skills", [])]
+            lessons = [KnowledgeRecord.from_dict(l) for l in state.get("retrieved_lessons", [])]
+            exp_ctx = RetrievedExperienceContext(skills=skills, lessons=lessons)
+            firewalled_context = ContextFirewall.assemble_architect_prompt_context(
+                intent=intent,
+                repo_context_str=repo_context_str,
+                experience_context=exp_ctx,
+                vault_context=state.get("vault_context", "")
+            )
+
+            prompt = (
+                f"You are Hydrameda's Epistemic Architect.\n"
+                f"{feedback_str}"
+                f"{intent_directives}\n"
+                f"{firewalled_context}\n\n"
+                f"Codebase AST Map:\n{state.get('ast_skeleton')}\n\n"
+                "Write a concise technical specification (in Markdown) defining required functions/classes and unit tests.\n"
+                "STRICT DESIGN CONSTRAINTS:\n"
+                "0. PRIMARY DIRECTIVE: Strictly satisfy the User Prompt and Category 1 Authoritative Constraints. Advisory skills, failure warnings, and background notes are non-authoritative reference material ONLY; do NOT substitute, expand, or alter the user's requested scope, protocol, or design based on background notes or skills.\n"
+                f"{prohibitions_str}"
+                f"{lib_constraint}"
+                "2. Raise ONLY built-in `ValueError` or `TypeError` (or custom exceptions that subclass `ValueError`).\n"
+                "3. Do NOT write `raise NotImplementedError` stubs in your specification."
+            )
+        else:
+            prompt = (
+                f"You are Hydrameda's Epistemic Architect.\n"
+                f"{feedback_str}"
+                f"User Prompt: {state.get('user_prompt')}\n\n"
+                f"Relevant Obsidian Notes:\n{state.get('vault_context')}\n\n"
+                f"Codebase AST Map:\n{state.get('ast_skeleton')}\n\n"
+                f"Repository Context:{repo_context_str}\n\n"
+                "Write a concise technical specification (in Markdown) defining required functions/classes and unit tests.\n"
+                "STRICT DESIGN CONSTRAINTS:\n"
+                "0. PRIMARY DIRECTIVE: Strictly satisfy the User Prompt. Background notes and vault context are reference material ONLY; do NOT substitute, expand, or alter the user's requested scope, protocol, or design based on background notes.\n"
+                f"{prohibitions_str}"
+                f"{lib_constraint}"
+                "2. Raise ONLY built-in `ValueError` or `TypeError` (or custom exceptions that subclass `ValueError`).\n"
+                "3. Do NOT write `raise NotImplementedError` stubs in your specification."
+            )
         spec, used_model = call_llm(ModelRole.ARCHITECT.value, prompt, max_tokens=4096)
 
         if not spec:
@@ -534,47 +718,122 @@ def node_spec_validator(state: HydramedaState) -> HydramedaState:
     reqs = TaskRequirements.from_dict(state.get("task_requirements"))
     vault_ctx = state.get("vault_context", "")
 
-    report = validate_specification_fidelity(
-        user_prompt=prompt,
-        spec_md=spec,
-        task_requirements=reqs,
-        vault_context=vault_ctx
-    )
+    # Phase 4: Hybrid Autonomous Prompt & Specification Auditor
+    intent = None
+    if state.get("structured_intent"):
+        intent = StructuredIntent.from_dict(state.get("structured_intent"))
+    elif prompt:
+        intent = ConstraintCompiler.compile(prompt)
 
-    if report.passed:
-        state["specification_fidelity_status"] = "PASSED"
-        state["specification_constraint_violations"] = []
-        state["specification_rejection_reason"] = ""
-        state["fidelity_feedback"] = ""
-        state["original_requirements_preserved"] = True
-        log_event(state, node, "SUCCESS", f"Specification fidelity verified on attempt {attempts}/3.")
+    if intent:
+        audit_rep = AuditEngine.audit_specification(
+            intent=intent,
+            spec_md=spec,
+            vault_context=vault_ctx,
+            retrieved_skills=state.get("retrieved_skills", []),
+            retrieved_lessons=state.get("retrieved_lessons", []),
+        )
+        state["specification_audit_report"] = audit_rep.to_dict()
+        state["specification_audit_outcome"] = audit_rep.outcome.value
+
+        # Baseline fidelity check for complete backwards-compatibility
+        base_rep = validate_specification_fidelity(
+            user_prompt=prompt,
+            spec_md=spec,
+            task_requirements=reqs,
+            vault_context=vault_ctx
+        )
+
+        overall_passed = audit_rep.passed and base_rep.passed
+        if overall_passed:
+            state["specification_fidelity_status"] = "PASSED"
+            state["specification_constraint_violations"] = []
+            state["specification_rejection_reason"] = ""
+            state["fidelity_feedback"] = ""
+            state["original_requirements_preserved"] = True
+            log_event(state, node, "SUCCESS", f"Specification audit PASSED on attempt {attempts}/3 (coverage: {audit_rep.coverage_score}).")
+        else:
+            state["specification_fidelity_status"] = "FAILED"
+            violations = list(audit_rep.prohibition_violations)
+            for v in base_rep.violations:
+                if v not in violations:
+                    violations.append(v)
+            if not violations:
+                violations = [f.description for f in audit_rep.findings if f.severity in ("CRITICAL", "HIGH")]
+
+            state["specification_constraint_violations"] = violations
+            state["specification_rejection_reason"] = "; ".join(violations)
+            feedback_items = []
+            if audit_rep.actionable_feedback:
+                feedback_items.append(audit_rep.actionable_feedback)
+            if base_rep.actionable_feedback and base_rep.actionable_feedback not in audit_rep.actionable_feedback:
+                feedback_items.append(base_rep.actionable_feedback)
+            state["fidelity_feedback"] = "\n\n".join(feedback_items)
+            state["original_requirements_preserved"] = False
+            log_event(state, node, "WARN", f"Specification audit REJECTED (attempt {attempts}/3): {state['specification_rejection_reason']}")
+
+            if attempts >= 3:
+                state["task_state"] = TaskState.FAILED.value
+                state["status"] = "FAILED"
+                state["error"] = f"Specification fidelity validation failed after 3 attempts: {state['specification_rejection_reason']}"
+                log_event(state, node, "ERROR", "Max specification validation attempts reached (3/3). Halting execution.")
     else:
-        state["specification_fidelity_status"] = "FAILED"
-        state["specification_constraint_violations"] = report.violations
-        state["specification_rejection_reason"] = "; ".join(report.violations)
-        state["fidelity_feedback"] = report.actionable_feedback
-        state["original_requirements_preserved"] = False
-        log_event(state, node, "WARN", f"Specification fidelity rejected (attempt {attempts}/3): {'; '.join(report.violations)}")
+        report = validate_specification_fidelity(
+            user_prompt=prompt,
+            spec_md=spec,
+            task_requirements=reqs,
+            vault_context=vault_ctx
+        )
 
-        if attempts >= 3:
-            state["task_state"] = TaskState.FAILED.value
-            state["status"] = "FAILED"
-            state["error"] = f"Specification fidelity validation failed after 3 attempts: {state['specification_rejection_reason']}"
-            log_event(state, node, "ERROR", "Max specification validation attempts reached (3/3). Halting execution.")
+        if report.passed:
+            state["specification_fidelity_status"] = "PASSED"
+            state["specification_constraint_violations"] = []
+            state["specification_rejection_reason"] = ""
+            state["fidelity_feedback"] = ""
+            state["original_requirements_preserved"] = True
+            log_event(state, node, "SUCCESS", f"Specification fidelity verified on attempt {attempts}/3.")
+        else:
+            state["specification_fidelity_status"] = "FAILED"
+            state["specification_constraint_violations"] = report.violations
+            state["specification_rejection_reason"] = "; ".join(report.violations)
+            state["fidelity_feedback"] = report.actionable_feedback
+            state["original_requirements_preserved"] = False
+            log_event(state, node, "WARN", f"Specification fidelity rejected (attempt {attempts}/3): {'; '.join(report.violations)}")
+
+            if attempts >= 3:
+                state["task_state"] = TaskState.FAILED.value
+                state["status"] = "FAILED"
+                state["error"] = f"Specification fidelity validation failed after 3 attempts: {state['specification_rejection_reason']}"
+                log_event(state, node, "ERROR", "Max specification validation attempts reached (3/3). Halting execution.")
 
     return state
 
 
 def route_after_spec_validator(state: HydramedaState) -> str:
-    """Conditional edge after spec_validator: routes to prompt_optimizer, architect retry, or consolidator halt."""
-    if state.get("specification_fidelity_status") == "PASSED":
+    """Conditional edge after specification auditor:
+    ├── PASSED → prompt_optimizer (→ approval_gate)
+    ├── REJECTED → architect retry (or consolidator safe failure if max retries reached)
+    ├── NEEDS_CLARIFICATION → approval_gate (user clarification)
+    └── INTERNAL_ERROR → consolidator (safe failure)
+    """
+    fidelity_status = state.get("specification_fidelity_status")
+    audit_outcome = state.get("specification_audit_outcome")
+
+    if fidelity_status == "PASSED" or audit_outcome == "PASSED":
         return "prompt_optimizer"
+    elif audit_outcome == "NEEDS_CLARIFICATION":
+        return "approval_gate"
+    elif fidelity_status == "FAILED" or audit_outcome == "REJECTED":
+        attempts = state.get("spec_validation_attempts", 0)
+        if attempts < 3:
+            return "architect"
+        state["status"] = "FAILED"
+        state["task_state"] = TaskState.FAILED.value
+        return "consolidator"
 
-    attempts = state.get("spec_validation_attempts", 0)
-    if attempts < 3:
-        return "architect"
-
-    # Max attempts reached: halt execution and route directly to consolidator (skip approval gate & code builder)
+    # INTERNAL_ERROR, invalid, or missing audit state -> safe failure
+    state["status"] = "FAILED"
+    state["task_state"] = TaskState.FAILED.value
     return "consolidator"
 
 
@@ -604,8 +863,22 @@ def node_prompt_optimizer(state: HydramedaState) -> HydramedaState:
         if prohibited:
             prohibitions_rule = "CRITICAL PROHIBITIONS (DO NOT IMPLEMENT):\n" + "\n".join(f"- {p}" for p in prohibited) + "\n"
 
+        intent_directives = ""
+        intent = None
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+        elif state.get("user_prompt"):
+            intent = ConstraintCompiler.compile(state["user_prompt"])
+            state["structured_intent"] = intent.to_dict()
+
+        if intent:
+            optimizer_directives = ConstraintCompiler.format_agent_prompt_directives(intent, role="prompt_optimizer")
+            coder_directives = ConstraintCompiler.format_agent_prompt_directives(intent, role="coder")
+            intent_directives = f"\n{optimizer_directives}\n\n{coder_directives}\n"
+
         prompt = (
             f"You are Hydrameda's Autonomous Repository Coder.\n"
+            f"{intent_directives}"
             f"Specification:\n{spec}\n\n"
             "CRITICAL RULES FOR REPOSITORY CODE & TESTS:\n"
             "1. Write COMPLETE, FULLY IMPLEMENTED production code. NEVER leave `raise NotImplementedError` or `pass` stubs!\n"
@@ -649,6 +922,49 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         state["task_state"] = TaskState.PLANNING.value
         return state
 
+    # Phase 5 & 9: Only a PASSED specification can enter human approval
+    # Prevent accidental bypasses of the specification auditor
+    # The graph must fail closed if audit state is missing, invalid, or unsuccessful.
+    audit_outcome = state.get("specification_audit_outcome")
+    fidelity_status = state.get("specification_fidelity_status")
+
+    if audit_outcome == "NEEDS_CLARIFICATION":
+        log_event(state, node, "INFO", "Pausing for user clarification on ambiguous specification...")
+        state["task_state"] = TaskState.AWAITING_APPROVAL.value
+        resume_val = interrupt({
+            "action": "clarify_specification",
+            "task_id": state.get("task_id"),
+            "feedback": state.get("fidelity_feedback") or "Specification requires user clarification.",
+            "question": "Provide clarification for specification? [approved: True/False, comments: ...]"
+        })
+        if isinstance(resume_val, dict) and resume_val.get("approved") is True:
+            state["approval_status"] = "APPROVED"
+            state["task_state"] = TaskState.PLANNING.value
+            return state
+        state["approval_status"] = "REJECTED"
+        state["status"] = "FAILED"
+        state["task_state"] = TaskState.CANCELLED.value
+        state["route"] = "cancel"
+        return state
+
+    if fidelity_status == "FAILED" or (audit_outcome and audit_outcome not in ("PASSED", "NEEDS_CLARIFICATION")):
+        log_event(state, node, "ERROR", f"Approval gate blocked: specification audit status is '{fidelity_status}' (not PASSED). Failing closed.")
+        state["approval_status"] = "REJECTED"
+        state["specification_approval_status"] = "REJECTED"
+        state["status"] = "FAILED"
+        state["task_state"] = TaskState.CANCELLED.value
+        state["route"] = "cancel"
+        return state
+
+    if state.get("spec_md") and fidelity_status != "PASSED":
+        log_event(state, node, "ERROR", f"Approval gate blocked: specification audit status is '{fidelity_status}' (not PASSED). Failing closed.")
+        state["approval_status"] = "REJECTED"
+        state["specification_approval_status"] = "REJECTED"
+        state["status"] = "FAILED"
+        state["task_state"] = TaskState.CANCELLED.value
+        state["route"] = "cancel"
+        return state
+
     # Requirement A2.5/A2.6: Auto-approval requires an explicit trusted execution policy
     ALLOWED_TRUSTED_POLICIES = {"ci_automation", "eval_harness", "internal_trusted", "batch_backlog", "cli_authorized"}
     trusted_policy = state.get("trusted_policy") or os.getenv("HYDRAMEDA_TRUSTED_POLICY")
@@ -666,6 +982,19 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         else:
             log_event(state, node, "WARN", f"Untrusted auto-approval attempt rejected (trusted_policy='{trusted_policy}'). Awaiting human review.")
 
+    # Phase 5: Build rich specification approval review display
+    intent = StructuredIntent.from_dict(state.get("structured_intent")) if state.get("structured_intent") else None
+    audit_rep = state.get("specification_audit_report")
+    review_display = GovernanceEngine.format_specification_approval_display(
+        task_id=state.get("task_id", ""),
+        user_prompt=state.get("user_prompt", ""),
+        spec_md=state.get("spec_md", ""),
+        intent=intent,
+        audit_report=audit_rep,
+        retrieved_skills=state.get("retrieved_skills"),
+        retrieved_lessons=state.get("retrieved_lessons"),
+    )
+
     # Trigger LangGraph interrupt for human-in-the-loop review
     state["task_state"] = TaskState.AWAITING_APPROVAL.value
     log_event(state, node, "INFO", "Interrupting for human review...")
@@ -673,6 +1002,7 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         "action": "review_specification",
         "task_id": state.get("task_id"),
         "spec_preview": state.get("spec_md", "")[:500],
+        "review_display": review_display,
         "question": "Approve technical specification for autonomous build? [approved: True/False]"
     })
 
@@ -693,6 +1023,23 @@ def node_approval_gate(state: HydramedaState) -> HydramedaState:
         approved = True
     else:
         approved = False
+
+    # Phase 5 Invariant: Human approval cannot override hard constraint prohibitions
+    if approved:
+        is_valid, validation_errors = GovernanceEngine.validate_specification_approval(
+            spec_md=state.get("spec_md", ""),
+            intent=intent,
+            audit_report=audit_rep,
+        )
+        if not is_valid:
+            approved = False
+            log_event(
+                state,
+                node,
+                "ERROR",
+                f"Human approval overridden by immutable constraint ledger: {'; '.join(validation_errors)}"
+            )
+            state["error"] = f"Approval rejected by governance ledger: {'; '.join(validation_errors)}"
 
     status_str = "APPROVED" if approved else "REJECTED"
     state["approval_status"] = status_str
@@ -762,6 +1109,17 @@ def node_code_builder(state: HydramedaState) -> HydramedaState:
         if not extracted:
             raise ValueError(f"Could not parse <file> tags from Builder Output. Raw snippet: {raw_content[:200]}")
 
+        # Invariant: Never create fake dependency packages or unrelated stubs to make checks pass
+        prohibited_stubs = ("litellm.py", "langgraph", "tree_sitter_language_pack", "pydantic", "pytest.py")
+        detected_stubs = [
+            f for f in extracted
+            if any(f == stub or f.startswith(f"{stub}/") or f.endswith(f"/{stub}") for stub in prohibited_stubs)
+        ]
+        if detected_stubs:
+            for s in detected_stubs:
+                extracted.pop(s, None)
+            log_event(state, node, "WARN", f"Stripped prohibited fake dependency stub(s) from builder output: {detected_stubs}")
+
         # Deterministic AST import healing
         if "module.py" in extracted:
             extracted["module.py"] = heal_module_imports(extracted["module.py"], is_test_file=False)
@@ -771,6 +1129,13 @@ def node_code_builder(state: HydramedaState) -> HydramedaState:
                 is_test_file=True,
                 module_code_for_test=extracted.get("module.py", "")
             )
+
+        # Validate code artifacts against negative constraints
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            violations = IntentGuard.validate_code_artifacts(intent, extracted)
+            if violations:
+                log_event(state, node, "WARN", f"Generated code contains constraint violations: {'; '.join(violations)}")
 
         # Apply changes safely inside isolated worktree via PatchEngine
         wt_str = state.get("worktree_path", "")
@@ -841,64 +1206,100 @@ def node_sandbox_verifier(state: HydramedaState) -> HydramedaState:
     attempt_label = f"Attempt {state.get('repair_count', 0) + 1}/4"
     log_event(state, node, "INFO", f"Running independent deterministic verification ({attempt_label})...")
 
+    tech_status = "FAILED"
     # Support mock verifier hook for deterministic unit tests
     if _VERIFIER_HANDLER is not None:
         exit_code, output = _VERIFIER_HANDLER(state)
+        tech_status = "PASSED" if exit_code == 0 else "FAILED"
         state["verifier_exit_code"] = exit_code
         state["verifier_output"] = output
+        state["technical_verification_status"] = tech_status
         if exit_code == 0:
             state["pytest_stderr"] = ""
-            state["status"] = "PASSED"
             state["verification_report"] = {
                 "overall_status": "passed",
                 "summary": output,
                 "checks": {}
             }
-            log_event(state, node, "SUCCESS", "Verification PASSED with 0 errors!")
         else:
             state["pytest_stderr"] = "\n".join(output.splitlines()[-60:])
-            state["status"] = "FAILED"
             state["verification_report"] = {
                 "overall_status": "failed",
                 "summary": output,
                 "failure_diagnostics": {"diagnostic": state["pytest_stderr"], "category": "ASSERTION_FAILURE"}
             }
-            log_event(state, node, "WARN", f"Verification FAILED (Exit code {exit_code})")
-        return state
+    else:
+        wt = Path(state.get("worktree_path", "")).resolve()
+        if not wt.exists():
+            state["technical_verification_status"] = "FAILED"
+            state["semantic_compliance_status"] = "FAILED"
+            state["status"] = "FAILED"
+            state["overall_task_status"] = "FAILED"
+            state["verifier_exit_code"] = 1
+            state["pytest_stderr"] = f"Worktree path does not exist: {wt}"
+            state["verification_report"] = {
+                "overall_status": "failed",
+                "summary": f"Worktree path does not exist: {wt}",
+                "checks": {}
+            }
+            return state
 
-    wt = Path(state.get("worktree_path", "")).resolve()
-    if not wt.exists():
-        state["status"] = "FAILED"
-        state["verifier_exit_code"] = 1
-        state["pytest_stderr"] = f"Worktree path does not exist: {wt}"
-        state["verification_report"] = {
-            "overall_status": "failed",
-            "summary": f"Worktree path does not exist: {wt}",
-            "checks": {}
-        }
-        return state
+        pipeline = VerificationPipeline()
+        report = pipeline.run_all_checks(
+            worktree_path=wt,
+            task_id=state.get("task_id", "task-verify"),
+            target_files=state.get("target_files")
+        )
 
-    pipeline = VerificationPipeline()
-    report = pipeline.run_all_checks(
-        worktree_path=wt,
-        task_id=state.get("task_id", "task-verify"),
-        target_files=state.get("target_files")
+        state["verification_report"] = report.to_dict()
+        state["verifier_output"] = report.summary
+        state["verifier_exit_code"] = 0 if report.is_passed() else 1
+        tech_status = "PASSED" if report.is_passed() else "FAILED"
+        state["technical_verification_status"] = tech_status
+
+        if report.is_passed():
+            state["pytest_stderr"] = ""
+        else:
+            diag = report.failure_diagnostics.get("diagnostic", "Verification check failed")
+            state["pytest_stderr"] = diag
+            state["error_analysis"] = report.failure_diagnostics
+
+    # Phase 7: Semantic Task-Compliance Verification Layer
+    intent = StructuredIntent.from_dict(state.get("structured_intent")) if state.get("structured_intent") else None
+    compliance_report = SemanticComplianceVerifier.verify_semantic_compliance(
+        user_prompt=state.get("user_prompt", ""),
+        intent=intent,
+        spec_md=state.get("spec_md", ""),
+        current_files=state.get("current_files"),
+        manifest=state.get("manifest"),
+        worktree_path=state.get("worktree_path"),
     )
+    state["semantic_compliance_report"] = compliance_report.to_dict()
+    state["semantic_compliance_status"] = compliance_report.status.value
 
-    state["verification_report"] = report.to_dict()
-    state["verifier_output"] = report.summary
-    state["verifier_exit_code"] = 0 if report.is_passed() else 1
-
-    if report.is_passed():
-        state["pytest_stderr"] = ""
+    # Synthesize overall status:
+    # Strict Invariant: Technical success must never automatically imply overall success!
+    # A task cannot be marked fully successful when technical checks pass but semantic task compliance fails.
+    if tech_status == "PASSED" and compliance_report.passed:
         state["status"] = "PASSED"
-        log_event(state, node, "SUCCESS", "All 8 independent verification checks PASSED!")
+        state["overall_task_status"] = "PASSED"
+        log_event(state, node, "SUCCESS", "All 8 independent verification checks PASSED and semantic task compliance VERIFIED!")
+    elif tech_status == "PASSED" and not compliance_report.passed:
+        state["status"] = "FAILED"
+        state["overall_task_status"] = "FAILED"
+        state["pytest_stderr"] = f"Semantic task compliance failed: {compliance_report.summary}"
+        state["error_analysis"] = {
+            "category": "SEMANTIC_COMPLIANCE_FAILURE",
+            "summary": compliance_report.summary,
+            "diagnostic": compliance_report.summary,
+            "failed_check": "semantic_compliance"
+        }
+        log_event(state, node, "ERROR", f"Technical verification passed, but SEMANTIC TASK COMPLIANCE FAILED: {compliance_report.summary}")
     else:
         state["status"] = "FAILED"
-        diag = report.failure_diagnostics.get("diagnostic", "Verification check failed")
-        state["pytest_stderr"] = diag
-        state["error_analysis"] = report.failure_diagnostics
-        log_event(state, node, "WARN", f"Verification FAILED on check: {report.failure_diagnostics.get('failed_check')}")
+        state["overall_task_status"] = "FAILED"
+        failed_chk = (state.get("error_analysis") or {}).get("failed_check", "verifier")
+        log_event(state, node, "WARN", f"Technical verification FAILED on check: {failed_chk}")
 
     return state
 
@@ -982,8 +1383,14 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
         if prohibited:
             prohibitions_rule = "CRITICAL PROHIBITIONS (DO NOT INTRODUCE DURING REPAIR):\n" + "\n".join(f"- {p}" for p in prohibited) + "\n"
 
+        intent_directives = ""
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            intent_directives = "\n" + ConstraintCompiler.format_agent_prompt_directives(intent, role="repairer") + "\n"
+
         prompt = (
             f"You are Hydrameda's Autonomous Repair Agent.\n"
+            f"{intent_directives}"
             f"Specification:\n{state.get('spec_md')}\n\n"
             f"REPAIR ATTEMPT {current_repairs}/3:\n"
             f"Error Category: {analysis.get('category', 'UNKNOWN')}\n"
@@ -1006,6 +1413,17 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
         if not extracted:
             raise ValueError(f"Could not parse repaired <file> tags from Repair Agent. Snippet: {raw_content[:200]}")
 
+        # Invariant: Never create fake dependency packages or unrelated stubs to make checks pass
+        prohibited_stubs = ("litellm.py", "langgraph", "tree_sitter_language_pack", "pydantic", "pytest.py")
+        detected_stubs = [
+            f for f in extracted
+            if any(f == stub or f.startswith(f"{stub}/") or f.endswith(f"/{stub}") for stub in prohibited_stubs)
+        ]
+        if detected_stubs:
+            for s in detected_stubs:
+                extracted.pop(s, None)
+            log_event(state, node, "WARN", f"Stripped prohibited fake dependency stub(s) from repair output: {detected_stubs}")
+
         # Merge with existing files
         merged = dict(prev_files)
         merged.update(extracted)
@@ -1018,6 +1436,13 @@ def node_repair_agent(state: HydramedaState) -> HydramedaState:
                 is_test_file=True,
                 module_code_for_test=merged.get("module.py", "")
             )
+
+        # Validate repaired artifacts against negative constraints
+        if state.get("structured_intent"):
+            intent = StructuredIntent.from_dict(state.get("structured_intent"))
+            violations = IntentGuard.validate_code_artifacts(intent, merged)
+            if violations:
+                log_event(state, node, "WARN", f"Repaired code contains constraint violations: {'; '.join(violations)}")
 
         # Apply repairs safely inside isolated worktree via PatchEngine
         wt_str = state.get("worktree_path", "")
@@ -1111,7 +1536,9 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         state["manifest"] = manifest.to_dict()
         state["manifest_hash"] = manifest.manifest_hash
 
-    is_verified = (state.get("status") == "PASSED" and state.get("verifier_exit_code") == 0)
+    tech_passed = (state.get("technical_verification_status") == "PASSED" or (state.get("status") == "PASSED" and state.get("verifier_exit_code") == 0))
+    semantic_passed = (state.get("semantic_compliance_status") in ("PASSED", "WARNING", None))
+    is_verified = bool(tech_passed and semantic_passed and state.get("status") == "PASSED")
 
     if manifest and is_verified:
         risk = GovernanceEngine.assess_risk(manifest, verification_passed=True)
@@ -1207,14 +1634,15 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
 
         state["approval_decision"] = decision.to_dict()
 
-        # Execute safe consolidation
+        intent = StructuredIntent.from_dict(state.get("structured_intent")) if state.get("structured_intent") else None
         consolidation_report = SafeConsolidator.consolidate_changes(
             worktree_path=wt or main_repo,
             main_repo_path=main_repo,
             manifest=manifest,
             decision=decision,
             verification_passed=is_verified,
-            author="Hydrameda Agent"
+            author="Hydrameda Agent",
+            intent=intent,
         )
         state["consolidation_report"] = consolidation_report.to_dict()
         state["diff"] = consolidation_report.final_diff or ""
@@ -1283,6 +1711,9 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
         "task_id": state.get("task_id", ""),
         "task_state": state.get("task_state", TaskState.FAILED.value),
         "status": state.get("status", "UNKNOWN"),
+        "overall_task_status": state.get("overall_task_status", state.get("status", "UNKNOWN")),
+        "technical_verification_status": state.get("technical_verification_status", "UNKNOWN"),
+        "semantic_compliance_status": state.get("semantic_compliance_status", "NOT_EVALUATED"),
         "specification_fidelity_status": state.get("specification_fidelity_status", "NOT_EVALUATED"),
         "specification_validation_attempts": state.get("spec_validation_attempts", 0),
         "specification_constraint_violations": state.get("specification_constraint_violations", []),
@@ -1343,6 +1774,70 @@ def node_consolidator(state: HydramedaState) -> HydramedaState:
     return state
 
 
+def node_experience_extractor(state: HydramedaState) -> HydramedaState:
+    """Node 14: Dedicated experience and skill extraction after verification and consolidation.
+
+    Extracts reusable lessons and procedural skills from both successful and failed tasks.
+    Enforces LearningPolicy to separate learning from code reuse:
+    - Retains only generalizable engineering lessons.
+    - Rejects raw code dumps, entire implementation templates, and universal repair assumptions.
+    - Records concrete evidence and source task ID for every lesson.
+    - Persists approved records to the KnowledgeStore.
+
+    Inputs:  task_id, user_prompt, execution state
+    Outputs: extracted_skills, extracted_lessons, experience_extraction_status
+    """
+    node = "experience_extractor"
+    log_event(state, node, "INFO", "Extracting reusable lessons and procedural skills...")
+    try:
+        task_id = state.get("task_id", "unknown_task")
+        user_prompt = state.get("user_prompt", "")
+        extracted_skills = SkillExtractor.extract_from_execution(
+            task_id=task_id,
+            task_prompt=user_prompt,
+            execution_state=dict(state)
+        )
+        extracted_lessons = ExperienceExtractor.extract_from_execution(
+            task_id=task_id,
+            task_prompt=user_prompt,
+            execution_state=dict(state)
+        )
+
+        valid_skills = []
+        for sk in extracted_skills:
+            is_valid, _ = LearningPolicy.validate_candidate_skill(sk)
+            if is_valid:
+                valid_skills.append(sk)
+
+        valid_lessons = []
+        for ls in extracted_lessons:
+            is_valid, _ = LearningPolicy.validate_candidate_lesson(ls)
+            if is_valid:
+                valid_lessons.append(ls)
+
+        if valid_skills or valid_lessons:
+            kstore = KnowledgeStore()
+            for sk in valid_skills:
+                kstore.add_record(sk)
+            for ls in valid_lessons:
+                kstore.add_record(ls)
+            log_event(
+                state,
+                node,
+                "SUCCESS",
+                f"Knowledge Store updated: {len(valid_skills)} skills, {len(valid_lessons)} lessons extracted"
+            )
+
+        state["extracted_skills"] = [s.to_dict() for s in valid_skills]
+        state["extracted_lessons"] = [l.to_dict() for l in valid_lessons]
+        state["experience_extraction_status"] = "COMPLETED"
+    except Exception as learn_err:  # noqa: BLE001 - learning extraction should not crash graph
+        log_event(state, node, "WARN", f"Experience learning extraction warning: {learn_err}")
+        state["experience_extraction_status"] = "FAILED"
+
+    return state
+
+
 # ============================================================================
 # Conditional Edge Routers
 # ============================================================================
@@ -1387,12 +1882,13 @@ def route_after_verifier(state: HydramedaState) -> str:
 # ============================================================================
 
 def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None = None):
-    """Builds and compiles the 12-node cyclic neuro-symbolic LangGraph engine."""
+    """Builds and compiles the 15-node neuro-symbolic LangGraph engine."""
     workflow = StateGraph(HydramedaState)
 
     # Register nodes
-    workflow.add_node("spec_analyzer", node_spec_analyzer)
+    workflow.add_node("intent_compiler", node_intent_compiler)
     workflow.add_node("rag_retriever", node_rag_retriever)
+    workflow.add_node("spec_analyzer", node_spec_analyzer)
     workflow.add_node("architect", node_architect)
     workflow.add_node("spec_validator", node_spec_validator)
     workflow.add_node("prompt_optimizer", node_prompt_optimizer)
@@ -1404,11 +1900,13 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
     workflow.add_node("error_analyzer", node_error_analyzer)
     workflow.add_node("repair_agent", node_repair_agent)
     workflow.add_node("consolidator", node_consolidator)
+    workflow.add_node("experience_extractor", node_experience_extractor)
 
-    # Linear planning spine with bounded fidelity revision loop
-    workflow.set_entry_point("spec_analyzer")
-    workflow.add_edge("spec_analyzer", "rag_retriever")
-    workflow.add_edge("rag_retriever", "architect")
+    # Linear planning spine: Intent -> Experience Retrieval -> Repository Context -> Architect -> Auditor
+    workflow.set_entry_point("intent_compiler")
+    workflow.add_edge("intent_compiler", "rag_retriever")
+    workflow.add_edge("rag_retriever", "spec_analyzer")
+    workflow.add_edge("spec_analyzer", "architect")
     workflow.add_edge("architect", "spec_validator")
     workflow.add_conditional_edges(
         "spec_validator",
@@ -1416,6 +1914,7 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
         {
             "prompt_optimizer": "prompt_optimizer",
             "architect": "architect",
+            "approval_gate": "approval_gate",
             "consolidator": "consolidator"
         }
     )
@@ -1457,8 +1956,9 @@ def build_hydrameda_graph(checkpointer: Any | None = None, db_path: Path | None 
     workflow.add_edge("error_analyzer", "repair_agent")
     workflow.add_edge("repair_agent", "sandbox_verifier")
 
-    # Terminal edge
-    workflow.add_edge("consolidator", END)
+    # Post-verification consolidation & experience extraction
+    workflow.add_edge("consolidator", "experience_extractor")
+    workflow.add_edge("experience_extractor", END)
 
     # Default persistent SQLite checkpointer
     if checkpointer is None:

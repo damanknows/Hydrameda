@@ -488,7 +488,12 @@ def test_langgraph_consolidation_interrupt_and_resume():
 
     def mock_llm(model_group: str, prompt: str):
         if "architect" in model_group:
-            return "# Spec for Gov Test\nCreate math module.", "mock-architect"
+            return (
+                "# Spec for Gov Test\n"
+                "Create math addition module.\n"
+                "Define add(a: int, b: int) -> int.\n"
+                "Includes pytest tests."
+            ), "mock-architect"
         code = (
             '<file name="calc.py">\n'
             'def add(a: int, b: int) -> int:\n    return a + b\n'
@@ -562,7 +567,12 @@ def test_langgraph_consolidation_rejection_halts_execution():
 
     def mock_llm(model_group: str, prompt: str):
         if "architect" in model_group:
-            return "# Spec for Reject Test", "mock-architect"
+            return (
+                "# Spec for Reject Test\n"
+                "Create scratch file.\n"
+                "Define run_scratch() -> None.\n"
+                "Includes pytest tests."
+            ), "mock-architect"
         return '<file name="scratch.py">\nx = 10\n</file>', "mock-coder"
 
     def mock_verifier(state):

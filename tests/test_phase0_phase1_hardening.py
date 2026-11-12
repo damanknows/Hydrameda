@@ -202,7 +202,10 @@ def test_untrusted_auto_approval_pauses_graph():
         "error": ""
     }
 
-    graph.set_llm_handler(lambda role, prompt: ("# Mock Spec\nSpec", "mock-model"))
+    graph.set_llm_handler(lambda role, prompt: (
+        "# Mock Spec\nTest prompt.\nDefine run_test() -> None.\nIncludes pytest tests.",
+        "mock-model"
+    ))
     config = {"configurable": {"thread_id": task_id}}
     try:
         # Graph execution will pause at approval_gate because trusted_policy is untrusted
@@ -273,11 +276,18 @@ def test_mcp_approve_task_tool():
         "error": ""
     }
 
-    app.invoke(state, config=config)
+    graph.set_llm_handler(lambda role, prompt: (
+        "# Mock Spec\nTest prompt.\nDefine run_test() -> None.\nIncludes pytest tests.",
+        "mock-model"
+    ))
+    try:
+        app.invoke(state, config=config)
 
-    with patch("graph.build_hydrameda_graph", return_value=app):
-        res = mcp_srv.approve_task(task_id, "test_hash", approved=True)
-        assert "resumed with approval: approved=True" in res
+        with patch("graph.build_hydrameda_graph", return_value=app):
+            res = mcp_srv.approve_task(task_id, "test_hash", approved=True)
+            assert "resumed with approval: approved=True" in res
+    finally:
+        graph.set_llm_handler(None)
 
 
 # ============================================================================
@@ -570,6 +580,7 @@ def test_hmac_sign_and_verify():
                 "# Spec: HMAC-SHA256 Token Signer\n"
                 "Define sign_token(key: bytes, message: str) -> str\n"
                 "Define verify_token(key: bytes, message: str, signature: str) -> bool\n"
+                "Includes pytest tests in test_hmac_signer.py.\n"
             )
             return spec, "mock-architect"
         return signer_code, "mock-coder"
