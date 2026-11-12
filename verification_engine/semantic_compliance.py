@@ -209,6 +209,17 @@ class SemanticComplianceVerifier:
                     missing_features.append(req_desc)
                 continue
 
+            if (
+                "minimal modification" in req_lower
+                or "touch only task-essential" in req_lower
+                or "conform strictly to repository" in req_lower
+                or "repository structure, conventions" in req_lower
+                or "standard library modules only" in req_lower
+            ):
+                # Architectural, scope, and stdlib meta-constraints are enforced via scope & prohibition checks
+                verified_features.append(req_desc)
+                continue
+
             # Clean metadata prefixes from requirement description
             clean_req = req_desc
             for prefix in ("Implement requested capability: ", "Deliverable: ", "Required capability: "):

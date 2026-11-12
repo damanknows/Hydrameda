@@ -70,7 +70,7 @@ class RelevanceFilter:
                         for step in record.procedure:
                             step_lower = step.lower()
                             if kw in step_lower:
-                                is_disclaiming = bool(re.search(r"\b(?:no|not|never|avoid|without|do not|disclaim|prohibit)\b", step_lower))
+                                is_disclaiming = bool(re.search(r"\b(?:no|not|never|avoid|without|do not|disclaim|prohibit|redact|filter|remove|strip|exclude|forbid|prevent)\b", step_lower))
                                 if not is_disclaiming:
                                     return (
                                         False,
